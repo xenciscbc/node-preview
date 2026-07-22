@@ -1,13 +1,13 @@
 schema_version = "1.0.0"
 
 id = "node_preview"
-version = "1.0.0"
+version = "1.0.1"
 name = "Node Preview Thumbnails"
 tagline = "Rendered thumbnails above shader, geometry & compositor nodes"
 maintainer = "Chun <xenc.cbc@gmail.com>"
 type = "add-on"
 
-website = "https://example.com/node-preview-thumbnails"
+website = "https://github.com/xenciscbc/node-preview"
 
 tags = ["Node", "Material", "Compositing"]
 
