@@ -14,7 +14,7 @@ tags = ["Node", "Material", "Compositing"]
 blender_version_min = "5.2.0"
 
 license = [
-  "SPDX:GPL-2.0-or-later",
+  "SPDX:GPL-3.0-or-later",
 ]
 
 # The add-on writes small preview renders to Blender's temp directory and

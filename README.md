@@ -76,4 +76,4 @@ blender --command extension validate dist/node_preview-1.0.1.zip
 
 ## License
 
-GPL-2.0-or-later.
+GPL-3.0-or-later.
