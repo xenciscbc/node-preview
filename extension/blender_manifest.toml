@@ -1,0 +1,23 @@
+schema_version = "1.0.0"
+
+id = "node_preview"
+version = "1.0.0"
+name = "Node Preview Thumbnails"
+tagline = "Rendered thumbnails above shader, geometry & compositor nodes"
+maintainer = "Chun <xenc.cbc@gmail.com>"
+type = "add-on"
+
+website = "https://example.com/node-preview-thumbnails"
+
+tags = ["Node", "Material", "Compositing"]
+
+blender_version_min = "5.2.0"
+
+license = [
+  "SPDX:GPL-2.0-or-later",
+]
+
+# The add-on writes small preview renders to Blender's temp directory and
+# reads them back to build the on-screen thumbnails.
+[permissions]
+files = "Write and read temporary preview-render images"

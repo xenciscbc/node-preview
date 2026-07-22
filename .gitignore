@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Build / scratch
+_to_delete/
+
+# Blender
+*.blend1
+*.blend2
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
