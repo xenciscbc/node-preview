@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 0),
+    "version": (1, 1, 2),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "node_preview"
-version = "1.1.1"
+version = "1.1.2"
 name = "Node Preview Thumbnails"
 tagline = "Rendered thumbnails above shader, geometry & compositor nodes"
 maintainer = "Chun <xenc.cbc@gmail.com>"
@@ -9,7 +9,7 @@ type = "add-on"
 
 website = "https://github.com/xenciscbc/node-preview"
 
-tags = ["Node", "Material", "Compositing"]
+tags = ["Node", "Material"]
 
 blender_version_min = "5.2.0"
 

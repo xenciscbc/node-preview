@@ -32,7 +32,7 @@ Tested on **Blender 5.2** (EEVEE + Cycles, Vulkan).
 
 ### As a Blender Extension (Blender 5.2+)
 `Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.1.0.zip`.
+`dist/node_preview-1.1.2.zip`.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -50,7 +50,7 @@ extension/
   __init__.py                     Extension entry — generated from the .py above
                                   with the bl_info block removed
 dist/
-  node_preview-1.1.0.zip   Packaged extension (manifest + __init__.py)
+  node_preview-1.1.2.zip   Packaged extension (manifest + __init__.py)
 build_extension.py                Rebuilds the extension zip from the source .py
 ```
 
@@ -75,7 +75,7 @@ Before submitting, edit `extension/blender_manifest.toml`:
 Validate locally with:
 
 ```
-blender --command extension validate dist/node_preview-1.1.0.zip
+blender --command extension validate dist/node_preview-1.1.2.zip
 ```
 
 ## License
