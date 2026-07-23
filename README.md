@@ -19,8 +19,12 @@ Tested on **Blender 5.2** (EEVEE + Cycles, Vulkan).
   compositor per node).
 - **Engine** follows the scene's Render Engine (EEVEE / Cycles).
 - **Auto update** (only re-renders nodes whose inputs changed) + manual Refresh.
-- **Only Marked Nodes** mode to save resources — turn previews on per node via
-  the node right-click menu or Mark / Unmark buttons.
+- **Preview Scope** (All / Selected / Marked) to control which nodes preview —
+  Selected follows your node selection; Marked uses per-node toggles (right-click
+  menu or Mark / Unmark buttons).
+- **Per-socket preview** for multi-output nodes (e.g. Texture Coordinate) — pick
+  which output to preview, or show all linked outputs side by side in a 2-column
+  grid.
 - **Help popup** and an **Auto / English / 中文** UI toggle — Auto follows
   Blender's own language setting (non-Chinese falls back to English).
 
@@ -28,7 +32,7 @@ Tested on **Blender 5.2** (EEVEE + Cycles, Vulkan).
 
 ### As a Blender Extension (Blender 5.2+)
 `Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.0.1.zip`.
+`dist/node_preview-1.1.0.zip`.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -46,7 +50,7 @@ extension/
   __init__.py                     Extension entry — generated from the .py above
                                   with the bl_info block removed
 dist/
-  node_preview-1.0.1.zip   Packaged extension (manifest + __init__.py)
+  node_preview-1.1.0.zip   Packaged extension (manifest + __init__.py)
 build_extension.py                Rebuilds the extension zip from the source .py
 ```
 
@@ -71,7 +75,7 @@ Before submitting, edit `extension/blender_manifest.toml`:
 Validate locally with:
 
 ```
-blender --command extension validate dist/node_preview-1.0.1.zip
+blender --command extension validate dist/node_preview-1.1.0.zip
 ```
 
 ## License

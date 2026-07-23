@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "node_preview"
-version = "1.0.1"
+version = "1.1.0"
 name = "Node Preview Thumbnails"
 tagline = "Rendered thumbnails above shader, geometry & compositor nodes"
 maintainer = "Chun <xenc.cbc@gmail.com>"

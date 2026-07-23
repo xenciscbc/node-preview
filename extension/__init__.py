@@ -12,7 +12,10 @@ Shader Editor:
     lit plane, using a self-contained preview environment (world + key light).
 Geometry Nodes:
   - Nodes with a Geometry output -> a small 3D render of the geometry at that
-    node (field-only sockets are skipped).
+    node.
+  - Texture / math / colour ShaderNodes (field outputs) -> a flat swatch, built
+    by rebuilding the node in a temporary material (upstream fields are not
+    evaluated; socket defaults stand in).
 Compositor:
   - Every node with an image output -> a flat swatch of that node's result.
     (Heavier: each preview renders the scene through the compositor, so it is
@@ -33,6 +36,7 @@ import hashlib
 import bpy
 import bmesh
 import gpu
+import blf
 from mathutils import Vector
 from gpu.types import GPUTexture, Buffer
 from gpu_extras.batch import batch_for_shader
@@ -82,12 +86,17 @@ _state = {
     "draw_handle": None, "textures": {}, "hashes": {}, "queue": [],
     "queued_keys": set(), "dirty": True, "rendering": False,
     "timer_running": False, "active_tree_ptr": None, "active_kind": None,
-    "shader_image": None,
+    "shader_image": None, "sel_sig": None,
 }
 
 
 def _key(tree, node_name):
     return "%d:%s" % (tree.as_pointer(), node_name)
+
+
+def _skey(tree, node_name, out_id):
+    """Cache key including the previewed output socket ('' for socketless)."""
+    return "%d:%s|%s" % (tree.as_pointer(), node_name, out_id or "")
 
 
 def _engine_id(props=None):
@@ -112,6 +121,91 @@ def first_enabled_output(node):
     return None
 
 
+def _tree_kind(tree):
+    """Best-effort preview kind from a node tree's bl_idname (Shader and World
+    share ShaderNodeTree; their previewable output set is the same)."""
+    tt = getattr(tree, "bl_idname", "")
+    if tt == KIND_GEO:
+        return KIND_GEO
+    if tt == KIND_COMP:
+        return KIND_COMP
+    return KIND_SHADER
+
+
+def _previewable_outputs(node, kind):
+    """Output sockets we can render a preview for, in socket order. Shader
+    output nodes (BSDF/Output) are drawn as the node itself, so they expose no
+    per-socket choice and return an empty list."""
+    if kind in (KIND_SHADER, KIND_WORLD):
+        if node.bl_idname in SHADER_OUTPUT_NODES:
+            return []
+        return [s for s in node.outputs
+                if s.enabled and s.type in {"SHADER", "RGBA", "VECTOR", "VALUE"}]
+    if kind == KIND_GEO:
+        geo = [s for s in node.outputs if s.enabled and s.type == "GEOMETRY"]
+        if geo:
+            return geo
+        # Field-producing ShaderNodes (texture / math / colour) -> flat swatch.
+        if node.bl_idname.startswith("ShaderNode"):
+            return [s for s in node.outputs
+                    if s.enabled and s.type in {"RGBA", "VECTOR", "VALUE"}]
+        return []
+    if kind == KIND_COMP:
+        return [s for s in node.outputs if s.enabled]
+    return []
+
+
+def _out_by_id(node, out_id):
+    """Resolve an output socket by identifier; fall back to first enabled."""
+    if out_id:
+        s = next((o for o in node.outputs if o.identifier == out_id), None)
+        if s is not None:
+            return s
+    return first_enabled_output(node)
+
+
+def _preview_targets(node, kind, props):
+    """List of output-socket identifiers to preview for this node.
+
+    - Shader output nodes -> [None]  (socketless, rendered as the node).
+    - 'Show All Linked Outputs' on + node has >=1 linked previewable output ->
+      every linked output, drawn side by side.
+    - Otherwise the node's chosen 'Preview Socket' (npv_socket); 'AUTO' means the
+      first linked output, or the first previewable output if none is linked.
+    """
+    if node.bl_idname in SHADER_OUTPUT_NODES:
+        return [None]
+    outs = _previewable_outputs(node, kind)
+    if not outs:
+        return [None]
+    linked = [s for s in outs if s.is_linked]
+    if getattr(props, "show_all_outputs", False) and linked:
+        return [s.identifier for s in linked]
+    pick = getattr(node, "npv_socket", "AUTO")
+    if pick not in ("", "AUTO") and any(s.identifier == pick for s in outs):
+        return [pick]
+    if linked:
+        return [linked[0].identifier]
+    return [outs[0].identifier]
+
+
+# Keep a reference to dynamically-built enum item lists so Blender does not
+# free the underlying strings (a well-known dynamic-EnumProperty pitfall).
+_socket_enum_cache = {}
+
+
+def _npv_socket_items(self, context):
+    node = self
+    kind = _tree_kind(node.id_data) if node.id_data is not None else KIND_SHADER
+    items = [("AUTO", "Auto (first linked)",
+              "Preview the first linked output, or the first output if none is linked", 0)]
+    for i, s in enumerate(_previewable_outputs(node, kind)):
+        label = s.name or s.identifier
+        items.append((s.identifier, label, "Preview the '%s' output" % label, i + 1))
+    _socket_enum_cache[node.as_pointer()] = items
+    return items
+
+
 def _shader_eligible(node, only_tex_shader):
     if node.mute:
         return False
@@ -130,12 +224,20 @@ def _shader_eligible(node, only_tex_shader):
 def node_eligible(node, kind, props):
     if node.type in SKIP_TYPES or node.bl_idname in SKIP_IDN:
         return False
-    if props.only_marked_nodes and not getattr(node, "npv_show", True):
+    scope = getattr(props, "preview_scope", "ALL")
+    if scope == "MARKED" and not getattr(node, "npv_show", True):
+        return False
+    if scope == "SELECTED" and not node.select:
         return False
     if kind == KIND_SHADER or kind == KIND_WORLD:
         return _shader_eligible(node, props.only_tex_shader)
     if kind == KIND_GEO:
-        return any(s.type == "GEOMETRY" for s in node.outputs)
+        if not _previewable_outputs(node, kind):
+            return False
+        # Field-swatch nodes (no geometry output) are gated by a checkbox.
+        if not any(s.type == "GEOMETRY" for s in node.outputs):
+            return getattr(props, "geo_fields", True)
+        return True
     if kind == KIND_COMP:
         return first_enabled_output(node) is not None
     return False
@@ -363,7 +465,7 @@ def _render_scene(scn):
 # --------------------------------------------------------------------------- #
 #  Renderers
 # --------------------------------------------------------------------------- #
-def render_shader(src_mat, node_name, res, props):
+def render_shader(src_mat, node_name, res, props, out_id=None):
     scn, plane, sphere = ensure_preview_scene(
         res, props.world_strength, props.sun_strength, _engine_id(props))
     prev = src_mat.copy()
@@ -373,7 +475,9 @@ def render_shader(src_mat, node_name, res, props):
         node = nt.nodes.get(node_name)
         if node is None:
             return None
-        is_shader = renders_as_shader(node)
+        osock = _out_by_id(node, out_id)
+        is_shader = (node.bl_idname in SHADER_OUTPUT_NODES
+                     or (osock is not None and osock.type == "SHADER"))
         if node.bl_idname not in SHADER_OUTPUT_NODES:
             out = next((n for n in nt.nodes
                         if n.bl_idname == "ShaderNodeOutputMaterial"), None) \
@@ -381,7 +485,6 @@ def render_shader(src_mat, node_name, res, props):
             surf = out.inputs["Surface"]
             for l in list(surf.links):
                 nt.links.remove(l)
-            osock = first_enabled_output(node)
             if osock is None:
                 return None
             if osock.type == "SHADER":
@@ -427,7 +530,7 @@ def _frame_object(scn, cam, obj):
     cam.data.ortho_scale = max(radius * 2.3, 0.2)
 
 
-def render_geometry(obj, node_name, res, props):
+def render_geometry(obj, node_name, res, props, out_id=None):
     mod = next((m for m in obj.modifiers
                 if m.type == 'NODES' and m.node_group is not None), None)
     if mod is None:
@@ -457,7 +560,12 @@ def render_geometry(obj, node_name, res, props):
         m2.node_group = ng2
         tgt = ng2.nodes.get(node_name)
         go = next((n for n in ng2.nodes if n.bl_idname == "NodeGroupOutput"), None)
-        gos = next((s for s in tgt.outputs if s.type == "GEOMETRY"), None)
+        gos = None
+        if out_id:
+            gos = next((s for s in tgt.outputs
+                        if s.identifier == out_id and s.type == "GEOMETRY"), None)
+        if gos is None:
+            gos = next((s for s in tgt.outputs if s.type == "GEOMETRY"), None)
         goin = next((i for i in go.inputs if i.type == "GEOMETRY"), None) if go else None
         if gos is None or goin is None:
             return None
@@ -486,7 +594,124 @@ def render_geometry(obj, node_name, res, props):
                 pass
 
 
-def render_compositor(scene, node_name, res, props):
+def _geo_tree_of(obj):
+    m = next((mo for mo in obj.modifiers
+              if mo.type == 'NODES' and mo.node_group is not None), None)
+    return m.node_group if m else None
+
+
+def _clone_shader_node(dst_tree, src):
+    """Best-effort clone of a ShaderNode into another node tree: copies writable
+    settings, colour-ramp / curve data and input default values. Lets us preview
+    texture / math / colour nodes that live in a Geometry node tree."""
+    dst = dst_tree.nodes.new(src.bl_idname)
+    for p in src.bl_rna.properties:
+        pid = p.identifier
+        if pid in _SKIP_PROPS or p.is_readonly:
+            continue
+        try:
+            setattr(dst, pid, getattr(src, pid))
+        except Exception:
+            pass
+    cr = getattr(src, "color_ramp", None)
+    dcr = getattr(dst, "color_ramp", None)
+    if cr is not None and dcr is not None:
+        try:
+            while len(dcr.elements) > len(cr.elements):
+                dcr.elements.remove(dcr.elements[-1])
+            for i, e in enumerate(cr.elements):
+                el = dcr.elements[i] if i < len(dcr.elements) \
+                    else dcr.elements.new(e.position)
+                el.position = e.position
+                el.color = e.color
+            dcr.color_mode = cr.color_mode
+            dcr.interpolation = cr.interpolation
+        except Exception:
+            pass
+    sm = getattr(src, "mapping", None)
+    dm = getattr(dst, "mapping", None)
+    if sm is not None and dm is not None and hasattr(sm, "curves"):
+        try:
+            for ci, c in enumerate(sm.curves):
+                dc = dm.curves[ci]
+                for pi, pt in enumerate(c.points):
+                    dp = dc.points[pi] if pi < len(dc.points) \
+                        else dc.points.new(pt.location[0], pt.location[1])
+                    dp.location = pt.location
+            dm.update()
+        except Exception:
+            pass
+    for si, di in zip(src.inputs, dst.inputs):
+        if hasattr(si, "default_value") and hasattr(di, "default_value"):
+            try:
+                di.default_value = si.default_value
+            except Exception:
+                pass
+    return dst
+
+
+def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
+    """Flat swatch for a field-producing ShaderNode (texture / math / colour)
+    inside a Geometry node tree: rebuild the node in a temporary material, feed
+    Generated coordinates to any Vector input, and render it like a shader
+    swatch. Upstream fields are not evaluated — socket defaults stand in."""
+    if tree is None:
+        tree = _geo_tree_of(obj)
+    if tree is None:
+        return None
+    src = tree.nodes.get(node_name)
+    if src is None:
+        return None
+    scn, plane, sphere = ensure_preview_scene(
+        res, props.world_strength, props.sun_strength, _engine_id(props))
+    m = bpy.data.materials.new(PREVIEW_MAT_TMP)
+    m.use_nodes = True
+    try:
+        nt = m.node_tree
+        for n in list(nt.nodes):
+            nt.nodes.remove(n)
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+        node = _clone_shader_node(nt, src)
+        osock = _out_by_id(node, out_id)
+        if osock is None:
+            return None
+        vin = node.inputs.get("Vector")
+        if vin is not None and not vin.is_linked:
+            tc = nt.nodes.new("ShaderNodeTexCoord")
+            nt.links.new(tc.outputs["Generated"], vin)
+        if osock.type == "SHADER":
+            nt.links.new(osock, out.inputs["Surface"])
+        else:
+            emit = nt.nodes.new("ShaderNodeEmission")
+            nt.links.new(osock, emit.inputs["Color"])
+            nt.links.new(emit.outputs[0], out.inputs["Surface"])
+        sphere.hide_render = True
+        plane.hide_render = False
+        plane.data.materials.clear()
+        plane.data.materials.append(m)
+        return _png_to_texture(_render_scene(scn))
+    finally:
+        try:
+            bpy.data.materials.remove(m)
+        except Exception:
+            pass
+
+
+def render_geo(obj, node_name, res, props, out_id=None):
+    """Dispatch a Geometry-node preview: a 3D render for geometry-output nodes,
+    a flat swatch for field-producing ShaderNodes."""
+    tree = _geo_tree_of(obj)
+    if tree is None:
+        return None
+    node = tree.nodes.get(node_name)
+    if node is None:
+        return None
+    if any(s.type == "GEOMETRY" for s in node.outputs):
+        return render_geometry(obj, node_name, res, props, out_id)
+    return render_geo_swatch(obj, node_name, res, props, out_id, tree)
+
+
+def render_compositor(scene, node_name, res, props, out_id=None):
     # Blender 5.2's new compositor evaluates only its designated output during
     # a render (the Viewer image comes from the realtime GPU compositor, which
     # a headless render does not drive). So to preview a node we temporarily
@@ -498,7 +723,7 @@ def render_compositor(scene, node_name, res, props):
     node = tree.nodes.get(node_name)
     if node is None:
         return None
-    out = first_enabled_output(node)
+    out = _out_by_id(node, out_id)
     if out is None:
         return None
     go = next((n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"), None)
@@ -546,7 +771,7 @@ def render_compositor(scene, node_name, res, props):
          r.engine, r.use_compositing, r.filepath, r.film_transparent) = rsaved
 
 
-def render_world(world, node_name, res, props):
+def render_world(world, node_name, res, props, out_id=None):
     scn, plane, sphere = ensure_preview_scene(
         res, props.world_strength, props.sun_strength, _engine_id(props))
     prevw = world.copy()
@@ -581,7 +806,7 @@ def render_world(world, node_name, res, props):
                 if sk is not None:
                     for l in list(sk.links):
                         wnt.links.remove(l)
-            osock = first_enabled_output(node)
+            osock = _out_by_id(node, out_id)
             if osock is None or volin is None:
                 return None
             wnt.links.new(osock, volin)
@@ -615,7 +840,7 @@ def render_world(world, node_name, res, props):
                 surf = out.inputs["Surface"]
                 for l in list(surf.links):
                     wnt.links.remove(l)
-                osock = first_enabled_output(node)
+                osock = _out_by_id(node, out_id)
                 if osock is None:
                     return None
                 if osock.type == "SHADER":
@@ -751,7 +976,7 @@ def _light_sig(props):
     return "%s|%.4f|%.4f" % (props.shader_shape, props.world_strength, props.sun_strength)
 
 
-def _enqueue(kind, src, tree, node_name, key, h, force):
+def _enqueue(kind, src, tree, node_name, out_id, key, h, force):
     if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
         return
     if key in _state["queued_keys"]:
@@ -761,7 +986,7 @@ def _enqueue(kind, src, tree, node_name, key, h, force):
                 break
         return
     _state["queue"].append({"kind": kind, "src": src[1], "node": node_name,
-                            "key": key, "hash": h})
+                            "out": out_id, "key": key, "hash": h})
     _state["queued_keys"].add(key)
 
 
@@ -775,7 +1000,6 @@ def rebuild_queue(tree, kind, props, force=False):
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
             continue
-        key = _key(tree, node.name)
         try:
             h = upstream_hash(node, memo)
         except Exception:
@@ -785,7 +1009,9 @@ def rebuild_queue(tree, kind, props, force=False):
         else:
             extra = esig
         h = hashlib.md5((h + extra).encode("utf-8", "replace")).hexdigest()
-        _enqueue(kind, src, tree, node.name, key, h, force)
+        for out_id in _preview_targets(node, kind, props):
+            key = _skey(tree, node.name, out_id)
+            _enqueue(kind, src, tree, node.name, out_id, key, h, force)
 
 
 def process_queue(props):
@@ -802,19 +1028,20 @@ def process_queue(props):
             item = _state["queue"].pop(0)
             _state["queued_keys"].discard(item["key"])
             k = item["kind"]
+            oid = item.get("out")
             try:
                 if k == KIND_SHADER:
                     m = bpy.data.materials.get(item["src"])
-                    tex = render_shader(m, item["node"], res, props) if m else None
+                    tex = render_shader(m, item["node"], res, props, oid) if m else None
                 elif k == KIND_WORLD:
                     w = bpy.data.worlds.get(item["src"])
-                    tex = render_world(w, item["node"], res, props) if w else None
+                    tex = render_world(w, item["node"], res, props, oid) if w else None
                 elif k == KIND_GEO:
                     o = bpy.data.objects.get(item["src"])
-                    tex = render_geometry(o, item["node"], res, props) if o else None
+                    tex = render_geo(o, item["node"], res, props, oid) if o else None
                 elif k == KIND_COMP:
                     s = bpy.data.scenes.get(item["src"])
-                    tex = render_compositor(s, item["node"], res, props) if s else None
+                    tex = render_compositor(s, item["node"], res, props, oid) if s else None
                 else:
                     tex = None
             except Exception as exc:
@@ -915,6 +1142,34 @@ def _draw_border(color, x0, y0, x1, y1, width=1.0):
     gpu.state.line_width_set(1.0)
 
 
+def _blf_size(font, size):
+    try:
+        blf.size(font, size)
+    except TypeError:
+        blf.size(font, size, 72)
+
+
+def _draw_label(text, x, y, maxw):
+    """Small socket name shown on a cell (side-by-side mode). Truncated with an
+    ellipsis to fit the cell width."""
+    font = 0
+    _blf_size(font, 11)
+    limit = max(0.0, maxw - 6.0)
+    if blf.dimensions(font, text)[0] > limit:
+        while text and blf.dimensions(font, text + "…")[0] > limit:
+            text = text[:-1]
+        text = (text + "…") if text else ""
+    if not text:
+        return
+    blf.enable(font, blf.SHADOW)
+    blf.shadow(font, 3, 0.0, 0.0, 0.0, 0.9)
+    blf.shadow_offset(font, 1, -1)
+    blf.position(font, x, y, 0.0)
+    blf.color(font, 1.0, 1.0, 1.0, 1.0)
+    blf.draw(font, text)
+    blf.disable(font, blf.SHADOW)
+
+
 def draw_callback():
     ctx = bpy.context
     space = ctx.space_data
@@ -930,9 +1185,24 @@ def draw_callback():
     if tree is None:
         return
 
-    _state["active_tree_ptr"] = tree.as_pointer()
+    ptr = tree.as_pointer()
+    if _state["active_tree_ptr"] != ptr or _state["active_kind"] != kind:
+        # Switched to a different node tree / editor type: re-queue so an
+        # enabled editor auto-refreshes once on switch (when Auto Update is on),
+        # instead of waiting for a depsgraph update or a manual Refresh.
+        _state["dirty"] = True
+    _state["active_tree_ptr"] = ptr
     _state["active_kind"] = kind
     _ensure_timer()
+
+    # In 'Selected' scope, a selection change has no depsgraph update, so watch
+    # it here and mark dirty when the set of selected nodes changes.
+    if getattr(props, "preview_scope", "ALL") == "SELECTED":
+        sig = (tree.as_pointer(),
+               tuple(sorted(n.name for n in tree.nodes if n.select)))
+        if _state.get("sel_sig") != sig:
+            _state["sel_sig"] = sig
+            _state["dirty"] = True
 
     region = ctx.region
     v2d = region.view2d
@@ -941,8 +1211,12 @@ def draw_callback():
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
             continue
-        tex = _state["textures"].get(_key(tree, node.name))
-        if tex is None:
+        cells = []
+        for oid in _preview_targets(node, kind, props):
+            t = _state["textures"].get(_skey(tree, node.name, oid))
+            if t is not None:
+                cells.append((oid, t))
+        if not cells:
             continue
         loc = node.location_absolute
         x0, y0 = v2d.view_to_region(loc.x, loc.y, clip=False)
@@ -950,12 +1224,31 @@ def draw_callback():
         w = x1 - x0
         if w < 10:
             continue
-        th = w
-        bx0, by0 = x0, y0 + gap
-        bx1, by1 = x0 + w, y0 + gap + th
-        _draw_rect((0.05, 0.05, 0.05, 0.85), bx0 - 2, by0 - 2, bx1 + 2, by1 + 2)
-        _draw_tex(tex, bx0, by0, bx1, by1)
-        _draw_border((0.0, 0.0, 0.0, 1.0), bx0 - 2, by0 - 2, bx1 + 2, by1 + 2, 1.0)
+        # Grid: single big swatch for one preview, otherwise 2 per row and wrap
+        # to further rows (cell = half node width, so cells stay legible).
+        n = len(cells)
+        cols = 1 if n == 1 else 2
+        rows = (n + cols - 1) // cols
+        cw = w / cols
+        by0 = y0 + gap                 # bottom edge of the whole grid
+        gw = cols * cw                 # grid width (== node width)
+        gh = rows * cw                 # grid height
+        # One dark backdrop + outer border for the whole grid.
+        _draw_rect((0.05, 0.05, 0.05, 0.85), x0 - 2, by0 - 2, x0 + gw + 2, by0 + gh + 2)
+        oname = {s.identifier: (s.name or s.identifier) for s in node.outputs}
+        for i, (oid, tex) in enumerate(cells):
+            col = i % cols
+            row_from_top = i // cols
+            cx0 = x0 + col * cw
+            cx1 = cx0 + cw
+            cy1 = by0 + gh - row_from_top * cw     # top of this cell
+            cy0 = cy1 - cw                         # bottom of this cell
+            _draw_tex(tex, cx0, cy0, cx1, cy1)
+            if n > 1:
+                _draw_border((0.0, 0.0, 0.0, 1.0), cx0, cy0, cx1, cy1, 1.0)
+                if oid and cw >= 40:
+                    _draw_label(oname.get(oid, oid), cx0 + 3, cy0 + 3, cw)
+        _draw_border((0.0, 0.0, 0.0, 1.0), x0 - 2, by0 - 2, x0 + gw + 2, by0 + gh + 2, 1.0)
     gpu.state.blend_set("NONE")
 
 
@@ -978,6 +1271,12 @@ def _node_show_update(self, context):
     _tag_node_editors()
 
 
+def _scope_update(self, context):
+    _state["dirty"] = True
+    _state["sel_sig"] = None
+    _tag_node_editors()
+
+
 # --------------------------------------------------------------------------- #
 #  Localisation (English / Chinese, default English)
 # --------------------------------------------------------------------------- #
@@ -990,6 +1289,10 @@ TR = {
         "engine_fmt": "Engine: %s (from render settings)",
         "only_tex": "Only Texture / Shader Nodes",
         "only_marked": "Only Marked Nodes",
+        "scope": "Preview Scope",
+        "scope_sel_hint": "Select nodes to preview them",
+        "show_all_outputs": "Show All Linked Outputs",
+        "preview_socket": "Preview Socket",
         "preview_active": "Preview Active Node",
         "mark_sel": "Mark Sel",
         "unmark_sel": "Unmark Sel",
@@ -999,6 +1302,7 @@ TR = {
         "other_editors": "Other Editors",
         "world": "World",
         "geometry": "Geometry Nodes",
+        "geo_fields": "Texture / Math Nodes",
         "compositor": "Compositor",
         "comp_note1": "Auto-updates on node edits.",
         "comp_note2": "Refresh to reflect 3D scene changes.",
@@ -1017,9 +1321,16 @@ TR = {
             ("line", "Engine:  follows the scene's Render Engine."),
             ("sec", "Filtering (save resources)"),
             ("line", "Only Texture / Shader Nodes:  skip Value / Math nodes."),
-            ("line", "Only Marked Nodes:  preview only nodes you switch on."),
-            ("line", "        Mark: right-click a node > Show Node Preview,"),
-            ("line", "        or select nodes and use Mark Sel / Unmark Sel."),
+            ("line", "Preview Scope:"),
+            ("line", "        All:  preview every eligible node."),
+            ("line", "        Selected:  only the nodes you select."),
+            ("line", "        Marked:  only nodes you switch on (right-click"),
+            ("line", "        > Show Node Preview, or Mark Sel / Unmark Sel)."),
+            ("sec", "Multi-output nodes (e.g. Texture Coordinate)"),
+            ("line", "Preview Socket:  which output the node previews"),
+            ("line", "        (Auto = first linked). Also on right-click menu."),
+            ("line", "Show All Linked Outputs:  preview every linked output"),
+            ("line", "        side by side in a 2-column grid."),
             ("sec", "Shader Nodes (BSDF / Output)"),
             ("line", "Sphere / Plane:  lit material ball, or a flat swatch."),
             ("line", "World Light:  even environment brightness on the ball."),
@@ -1029,6 +1340,8 @@ TR = {
             ("line", "World:  environment swatch; a volume node (fog) is"),
             ("line", "        shown on a lit sphere instead."),
             ("line", "Geometry Nodes:  a small 3D render of the geometry."),
+            ("line", "        Texture / Math Nodes (checkbox): also show a"),
+            ("line", "        flat swatch for texture / math / colour nodes."),
             ("line", "Compositor:  each node's image. Renders the scene per"),
             ("line", "        node, so it is heavier."),
             ("sec", "Buttons"),
@@ -1044,6 +1357,10 @@ TR = {
         "engine_fmt": "引擎：%s（來自算圖設定）",
         "only_tex": "只有貼圖 / 著色器節點",
         "only_marked": "只顯示已勾選節點",
+        "scope": "預覽範圍",
+        "scope_sel_hint": "選取節點即可預覽",
+        "show_all_outputs": "並排顯示所有連線輸出",
+        "preview_socket": "預覽插槽",
         "preview_active": "預覽作用中節點",
         "mark_sel": "勾選所選",
         "unmark_sel": "取消所選",
@@ -1053,6 +1370,7 @@ TR = {
         "other_editors": "其他編輯器",
         "world": "世界",
         "geometry": "幾何節點",
+        "geo_fields": "貼圖 / 數學節點",
         "compositor": "合成器",
         "comp_note1": "編輯節點時自動更新。",
         "comp_note2": "按刷新以反映 3D 場景變動。",
@@ -1071,9 +1389,16 @@ TR = {
             ("line", "引擎：跟隨場景的算圖引擎（EEVEE / Cycles）。"),
             ("sec", "過濾（節省資源）"),
             ("line", "只有貼圖 / 著色器節點：略過純 Value / Math 節點。"),
-            ("line", "只顯示已勾選節點：只預覽你開啟的節點。"),
-            ("line", "        勾選：右鍵節點 > 顯示節點預覽，"),
-            ("line", "        或選取節點後按 勾選所選 / 取消所選。"),
+            ("line", "預覽範圍："),
+            ("line", "        All：預覽所有符合的節點。"),
+            ("line", "        Selected：只預覽你選取的節點。"),
+            ("line", "        Marked：只預覽你開啟的節點（右鍵 > 顯示"),
+            ("line", "        節點預覽，或用 勾選所選 / 取消所選）。"),
+            ("sec", "多輸出節點（如 Texture Coordinate）"),
+            ("line", "預覽插槽：節點要預覽哪個輸出（自動 = 第一個連線）。"),
+            ("line", "        也可在右鍵選單設定。"),
+            ("line", "並排顯示所有連線輸出：有連線的輸出以 2 欄格狀並排"),
+            ("line", "        （每個各算一張圖）。"),
             ("sec", "著色器節點（BSDF / 輸出）"),
             ("line", "球體 / 平面：打光材質球，或平面色板。"),
             ("line", "世界光：材質球的均勻環境亮度。"),
@@ -1081,7 +1406,9 @@ TR = {
             ("line", "貼圖 / 顏色節點一律顯示平面色板。"),
             ("sec", "其他編輯器（開啟以預覽）"),
             ("line", "世界：環境色板；體積節點（霧）改用打光球顯示。"),
-            ("line", "幾何節點：目前幾何的小張 3D 算圖。"),
+            ("line", "幾何節點：幾何輸出用小張 3D 算圖。"),
+            ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
+            ("line", "        數學 / 顏色節點顯示為平面色板。"),
             ("line", "合成器：各節點的影像結果。每個節點會算一次"),
             ("line", "        場景，較重。"),
             ("sec", "按鈕"),
@@ -1123,11 +1450,21 @@ class NPVProps(bpy.types.PropertyGroup):
     auto_update: bpy.props.BoolProperty(name="Auto Update", default=True)
     only_tex_shader: bpy.props.BoolProperty(
         name="Only Texture / Shader Nodes", default=True, update=_mark_dirty)
-    only_marked_nodes: bpy.props.BoolProperty(
-        name="Only Marked Nodes",
-        description="Only preview nodes whose 'Show Preview' checkbox is on "
-                    "(right-click a node, or use the buttons below). Saves resources",
-        default=False, update=_mark_dirty)
+    preview_scope: bpy.props.EnumProperty(
+        name="Preview Scope",
+        description="Which nodes get a preview thumbnail",
+        items=[("ALL", "All", "Preview every eligible node"),
+               ("SELECTED", "Selected", "Only preview nodes that are selected "
+                "in the editor — select nodes to control what shows"),
+               ("MARKED", "Marked", "Only preview nodes whose 'Show Preview' "
+                "checkbox is on (right-click a node, or use the buttons below)")],
+        default="ALL", update=_scope_update)
+    show_all_outputs: bpy.props.BoolProperty(
+        name="Show All Linked Outputs",
+        description="Preview every linked output of a node side by side (in a "
+                    "2-column grid), instead of a single Preview Socket. One "
+                    "render per linked output",
+        default=False, update=_node_show_update)
     resolution: bpy.props.EnumProperty(
         name="Quality",
         items=[("64", "Low (64px)", ""), ("128", "Medium (128px)", ""),
@@ -1147,6 +1484,11 @@ class NPVProps(bpy.types.PropertyGroup):
         name="Geometry Nodes",
         description="Preview geometry-output nodes as a small 3D render",
         default=False, update=_mark_dirty)
+    geo_fields: bpy.props.BoolProperty(
+        name="Texture / Math Nodes",
+        description="Also preview texture / math / colour nodes in Geometry "
+                    "Nodes as a flat swatch (isolated node, socket defaults)",
+        default=True, update=_node_show_update)
     preview_compositor: bpy.props.BoolProperty(
         name="Compositor",
         description="Preview compositor nodes (each preview renders the scene "
@@ -1293,14 +1635,24 @@ class NPV_PT_panel(bpy.types.Panel):
             col.prop(props, "only_tex_shader", text=t("only_tex"))
 
         mbox = body.box()
-        mbox.prop(props, "only_marked_nodes", text=t("only_marked"))
-        if props.only_marked_nodes:
+        mbox.label(text=t("scope"))
+        mbox.prop(props, "preview_scope", expand=True)
+        if props.preview_scope == "SELECTED":
+            mbox.label(text=t("scope_sel_hint"), icon="RESTRICT_SELECT_OFF")
+        elif props.preview_scope == "MARKED":
             an = context.active_node
             if an is not None:
                 mbox.prop(an, "npv_show", text=t("preview_active"), toggle=True)
             r = mbox.row(align=True)
             r.operator("node.npv_mark_selected", text=t("mark_sel")).mark = True
             r.operator("node.npv_mark_selected", text=t("unmark_sel")).mark = False
+
+        obox = body.box()
+        obox.prop(props, "show_all_outputs", text=t("show_all_outputs"))
+        an = context.active_node
+        if an is not None and not props.show_all_outputs \
+                and len(_previewable_outputs(an, kind)) > 1:
+            obox.prop(an, "npv_socket", text=t("preview_socket"))
 
         if kind == KIND_SHADER:
             box = body.box()
@@ -1315,6 +1667,10 @@ class NPV_PT_panel(bpy.types.Panel):
         box.label(text=t("other_editors"), icon="NODETREE")
         box.prop(props, "preview_world", text=t("world"))
         box.prop(props, "preview_geometry", text=t("geometry"))
+        sub = box.row()
+        sub.enabled = props.preview_geometry
+        sub.separator(factor=2.0)
+        sub.prop(props, "geo_fields", text=t("geo_fields"))
         box.prop(props, "preview_compositor", text=t("compositor"))
         if kind == KIND_COMP and props.preview_compositor:
             box.label(text=t("comp_note1"), icon="INFO")
@@ -1342,6 +1698,9 @@ def _node_context_menu(self, context):
     if sp and sp.type == "NODE_EDITOR" and sp.tree_type in KINDS and node is not None:
         self.layout.separator()
         self.layout.prop(node, "npv_show", text=_t(context.scene.npv, "ctx_show"))
+        if len(_previewable_outputs(node, space_kind(sp))) > 1:
+            self.layout.prop(node, "npv_socket",
+                             text=_t(context.scene.npv, "preview_socket"))
 
 
 def _cleanup_datablocks():
@@ -1384,6 +1743,11 @@ def register():
         description="Show this node's preview thumbnail "
                     "(applies when 'Only Marked Nodes' is on)",
         default=True, update=_node_show_update)
+    bpy.types.Node.npv_socket = bpy.props.EnumProperty(
+        name="Preview Socket",
+        description="Which output of this node to preview "
+                    "(Auto = the first linked output)",
+        items=_npv_socket_items, update=_node_show_update)
     try:
         bpy.types.NODE_MT_context_menu.append(_node_context_menu)
     except Exception:
@@ -1406,6 +1770,11 @@ def unregister():
         del bpy.types.Node.npv_show
     except Exception:
         pass
+    try:
+        del bpy.types.Node.npv_socket
+    except Exception:
+        pass
+    _socket_enum_cache.clear()
     if _on_depsgraph in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph)
     if bpy.app.timers.is_registered(_timer):
