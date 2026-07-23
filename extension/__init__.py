@@ -30,6 +30,7 @@ Preferences > Add-ons > (v) Install from Disk...
 """
 
 
+
 import os
 import hashlib
 
@@ -1149,12 +1150,13 @@ def _blf_size(font, size):
         blf.size(font, size, 72)
 
 
-def _draw_label(text, x, y, maxw):
+def _draw_label(text, x, y, maxw, ps=1.0):
     """Small socket name shown on a cell (side-by-side mode). Truncated with an
-    ellipsis to fit the cell width."""
+    ellipsis to fit the cell width. ``ps`` is the UI pixel size so the font and
+    padding scale with HiDPI / UI resolution scale."""
     font = 0
-    _blf_size(font, 11)
-    limit = max(0.0, maxw - 6.0)
+    _blf_size(font, round(11 * ps))
+    limit = max(0.0, maxw - 6.0 * ps)
     if blf.dimensions(font, text)[0] > limit:
         while text and blf.dimensions(font, text + "…")[0] > limit:
             text = text[:-1]
@@ -1163,7 +1165,7 @@ def _draw_label(text, x, y, maxw):
         return
     blf.enable(font, blf.SHADOW)
     blf.shadow(font, 3, 0.0, 0.0, 0.0, 0.9)
-    blf.shadow_offset(font, 1, -1)
+    blf.shadow_offset(font, round(1 * ps), round(-1 * ps))
     blf.position(font, x, y, 0.0)
     blf.color(font, 1.0, 1.0, 1.0, 1.0)
     blf.draw(font, text)
@@ -1206,7 +1208,25 @@ def draw_callback():
 
     region = ctx.region
     v2d = region.view2d
-    gap = 6.0
+    # UI-scale correction. The node editor draws every node at
+    # ``location * ui_scale`` in view2d space (and ``node.dimensions`` is
+    # already in those scaled view units), while ``node.location`` itself is in
+    # unscaled node units. view_to_region() and this POST_PIXEL handler share
+    # the same region-pixel space, so no framebuffer/pixel_size factor is
+    # involved -- but node coordinates must be multiplied by ui_scale BEFORE
+    # view_to_region(), or previews land at 1/ui_scale of the node position
+    # (offset grows with distance from the view origin): the reported bug on
+    # HiDPI / scaled-UI machines. NOTE: read ui_scale inside the draw callback;
+    # outside a window draw context it can report stale values.
+    ps = ctx.preferences.system.ui_scale
+    # The same factor keeps fixed decorations (gap, padding, borders, label)
+    # proportional to Blender's own UI at any scale.
+    gap = 6.0 * ps
+    pad = 2.0 * ps                 # backdrop / outer-border padding
+    bw = 1.0                       # border line width: intentionally NOT
+                                   # scaled -- a hairline border looks right at
+                                   # any Resolution Scale; scaling it reads as
+                                   # too thick.
     gpu.state.blend_set("ALPHA")
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
@@ -1219,8 +1239,10 @@ def draw_callback():
         if not cells:
             continue
         loc = node.location_absolute
-        x0, y0 = v2d.view_to_region(loc.x, loc.y, clip=False)
-        x1, _ = v2d.view_to_region(loc.x + node.width, loc.y, clip=False)
+        # Scale node-space coords by ui_scale BEFORE view_to_region (see note).
+        x0, y0 = v2d.view_to_region(loc.x * ps, loc.y * ps, clip=False)
+        x1, _ = v2d.view_to_region((loc.x + node.width) * ps, loc.y * ps,
+                                   clip=False)
         w = x1 - x0
         if w < 10:
             continue
@@ -1234,7 +1256,7 @@ def draw_callback():
         gw = cols * cw                 # grid width (== node width)
         gh = rows * cw                 # grid height
         # One dark backdrop + outer border for the whole grid.
-        _draw_rect((0.05, 0.05, 0.05, 0.85), x0 - 2, by0 - 2, x0 + gw + 2, by0 + gh + 2)
+        _draw_rect((0.05, 0.05, 0.05, 0.85), x0 - pad, by0 - pad, x0 + gw + pad, by0 + gh + pad)
         oname = {s.identifier: (s.name or s.identifier) for s in node.outputs}
         for i, (oid, tex) in enumerate(cells):
             col = i % cols
@@ -1245,10 +1267,10 @@ def draw_callback():
             cy0 = cy1 - cw                         # bottom of this cell
             _draw_tex(tex, cx0, cy0, cx1, cy1)
             if n > 1:
-                _draw_border((0.0, 0.0, 0.0, 1.0), cx0, cy0, cx1, cy1, 1.0)
-                if oid and cw >= 40:
-                    _draw_label(oname.get(oid, oid), cx0 + 3, cy0 + 3, cw)
-        _draw_border((0.0, 0.0, 0.0, 1.0), x0 - 2, by0 - 2, x0 + gw + 2, by0 + gh + 2, 1.0)
+                _draw_border((0.0, 0.0, 0.0, 1.0), cx0, cy0, cx1, cy1, bw)
+                if oid and cw >= 40 * ps:
+                    _draw_label(oname.get(oid, oid), cx0 + 3 * ps, cy0 + 3 * ps, cw, ps)
+        _draw_border((0.0, 0.0, 0.0, 1.0), x0 - pad, by0 - pad, x0 + gw + pad, by0 + gh + pad, bw)
     gpu.state.blend_set("NONE")
 
 
