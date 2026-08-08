@@ -1093,10 +1093,12 @@ def _timer():
 
 
 def _ensure_timer():
-    if not _state["timer_running"]:
-        _state["timer_running"] = True
-        if not bpy.app.timers.is_registered(_timer):
-            bpy.app.timers.register(_timer, first_interval=0.1)
+    # Trust Blender's own registry, not our cached flag: a non-persistent
+    # timer is silently dropped on every file load, which would otherwise
+    # leave `timer_running` stuck True forever with no timer actually running.
+    if not bpy.app.timers.is_registered(_timer):
+        bpy.app.timers.register(_timer, first_interval=0.1, persistent=True)
+    _state["timer_running"] = True
 
 
 def _on_depsgraph(scene, depsgraph):
