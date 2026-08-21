@@ -36,6 +36,7 @@ import hashlib
 
 import bpy
 import bmesh
+from bpy.app.handlers import persistent
 import gpu
 import blf
 from mathutils import Vector
@@ -1089,6 +1090,7 @@ def _ensure_timer():
             bpy.app.timers.register(_timer, first_interval=0.1)
 
 
+@persistent
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
         return
@@ -1099,6 +1101,26 @@ def _on_depsgraph(scene, depsgraph):
         if getattr(upd.id, "id_type", "") in {"MATERIAL", "NODETREE", "OBJECT"}:
             _state["dirty"] = True
             break
+
+
+@persistent
+def _on_load_post(_filepath):
+    """Reset after a .blend load: every cached tree/node pointer and GPU
+    texture belongs to the old file, and Blender drops non-persistent timers
+    on load (while _state still says the timer is running, so _ensure_timer()
+    would never re-register it)."""
+    _state["textures"].clear()
+    _state["hashes"].clear()
+    _state["queue"].clear()
+    _state["queued_keys"].clear()
+    _socket_enum_cache.clear()
+    _state["sel_sig"] = None
+    _state["active_tree_ptr"] = None
+    _state["active_kind"] = None
+    _state["rendering"] = False
+    _state["timer_running"] = False
+    _state["dirty"] = True
+    _ensure_timer()
 
 
 # --------------------------------------------------------------------------- #
@@ -1779,6 +1801,8 @@ def register():
             draw_callback, (), "WINDOW", "POST_PIXEL")
     if _on_depsgraph not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
     _state["dirty"] = True
     _ensure_timer()
 
@@ -1799,6 +1823,8 @@ def unregister():
     _socket_enum_cache.clear()
     if _on_depsgraph in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_timer):
         try:
             bpy.app.timers.unregister(_timer)
