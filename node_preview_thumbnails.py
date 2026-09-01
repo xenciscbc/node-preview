@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 3),
+    "version": (1, 1, 4),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",
@@ -1118,9 +1118,9 @@ def _on_depsgraph(scene, depsgraph):
 @persistent
 def _on_load_post(_filepath):
     """Reset after a .blend load: every cached tree/node pointer and GPU
-    texture belongs to the old file, and Blender drops non-persistent timers
-    on load (while _state still says the timer is running, so _ensure_timer()
-    would never re-register it)."""
+    texture belongs to the old file. The preview timer itself is persistent
+    and survives the load; _ensure_timer() here is just a safety net in case
+    it is gone for any other reason."""
     _state["textures"].clear()
     _state["hashes"].clear()
     _state["queue"].clear()

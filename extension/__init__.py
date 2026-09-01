@@ -1108,9 +1108,9 @@ def _on_depsgraph(scene, depsgraph):
 @persistent
 def _on_load_post(_filepath):
     """Reset after a .blend load: every cached tree/node pointer and GPU
-    texture belongs to the old file, and Blender drops non-persistent timers
-    on load (while _state still says the timer is running, so _ensure_timer()
-    would never re-register it)."""
+    texture belongs to the old file. The preview timer itself is persistent
+    and survives the load; _ensure_timer() here is just a safety net in case
+    it is gone for any other reason."""
     _state["textures"].clear()
     _state["hashes"].clear()
     _state["queue"].clear()
