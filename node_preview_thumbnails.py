@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 4),
+    "version": (1, 1, 5),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",
@@ -727,39 +727,48 @@ def render_compositor(scene, node_name, res, props, out_id=None):
     # Blender 5.2's new compositor evaluates only its designated output during
     # a render (the Viewer image comes from the realtime GPU compositor, which
     # a headless render does not drive). So to preview a node we temporarily
-    # route its output to the Group Output, render the scene through the
-    # compositor to a file, read it back, then restore the original wiring.
-    tree = getattr(scene, "compositing_node_group", None)
-    if tree is None:
+    # route its output to the Group Output and render through the compositor
+    # to a file, then read it back.
+    # The render runs on a throwaway copy of the scene and its compositor tree:
+    # rendering the user's own scene overwrites its Render Result, and a Viewer
+    # node in the rendered tree overwrites the shared "Viewer Node" image, both
+    # at thumbnail size. Scene.copy() links objects/collections (cheap) but
+    # shares the compositor tree, so the tree is copied separately.
+    src_tree = getattr(scene, "compositing_node_group", None)
+    if src_tree is None or src_tree.nodes.get(node_name) is None:
         return None
-    node = tree.nodes.get(node_name)
-    if node is None:
-        return None
-    out = _out_by_id(node, out_id)
-    if out is None:
-        return None
-    go = next((n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"), None)
-    if go is None:
-        go = tree.nodes.new("NodeGroupOutput")
-    goin = next((i for i in go.inputs if i.type == "RGBA"), None)
-    if goin is None:
-        try:
-            tree.interface.new_socket("Image", in_out='OUTPUT',
-                                      socket_type='NodeSocketColor')
-        except Exception:
-            pass
-        goin = next((i for i in go.inputs if i.type == "RGBA"),
-                    go.inputs[0] if go.inputs else None)
-    if goin is None:
-        return None
-    saved = [(l.from_node.name, l.from_socket.identifier) for l in goin.links]
-    r = scene.render
-    rsaved = (r.resolution_x, r.resolution_y, r.resolution_percentage,
-              r.engine, r.use_compositing, r.filepath, r.film_transparent)
+    tmp = scene.copy()
+    tree = src_tree.copy()
     try:
+        tmp.compositing_node_group = tree
+        for n in list(tree.nodes):
+            if n.bl_idname in ("CompositorNodeViewer", "CompositorNodeOutputFile"):
+                tree.nodes.remove(n)
+            elif (n.bl_idname == "CompositorNodeRLayers"
+                  and getattr(n, "scene", None) == scene):
+                n.scene = tmp
+        node = tree.nodes.get(node_name)
+        out = _out_by_id(node, out_id) if node is not None else None
+        if out is None:
+            return None
+        go = next((n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"), None)
+        if go is None:
+            go = tree.nodes.new("NodeGroupOutput")
+        goin = next((i for i in go.inputs if i.type == "RGBA"), None)
+        if goin is None:
+            try:
+                tree.interface.new_socket("Image", in_out='OUTPUT',
+                                          socket_type='NodeSocketColor')
+            except Exception:
+                pass
+            goin = next((i for i in go.inputs if i.type == "RGBA"),
+                        go.inputs[0] if go.inputs else None)
+        if goin is None:
+            return None
         for l in list(goin.links):
             tree.links.remove(l)
         tree.links.new(out, goin)
+        r = tmp.render
         r.resolution_x = res
         r.resolution_y = res
         r.resolution_percentage = 100
@@ -769,18 +778,16 @@ def render_compositor(scene, node_name, res, props, out_id=None):
             pass
         r.use_compositing = True
         r.film_transparent = True
-        return _png_to_texture(_render_scene(scene))
+        return _png_to_texture(_render_scene(tmp))
     finally:
-        for l in list(goin.links):
-            tree.links.remove(l)
-        for fn, fs in saved:
-            src = tree.nodes.get(fn)
-            if src is not None:
-                so = next((s for s in src.outputs if s.identifier == fs), None)
-                if so is not None:
-                    tree.links.new(so, goin)
-        (r.resolution_x, r.resolution_y, r.resolution_percentage,
-         r.engine, r.use_compositing, r.filepath, r.film_transparent) = rsaved
+        try:
+            bpy.data.scenes.remove(tmp)
+        except Exception:
+            pass
+        try:
+            bpy.data.node_groups.remove(tree)
+        except Exception:
+            pass
 
 
 def render_world(world, node_name, res, props, out_id=None):
