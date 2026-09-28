@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 7),
+    "version": (1, 1, 8),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",
@@ -77,6 +77,9 @@ PREVIEW_CAM = "NPV_preview_cam"
 PREVIEW_SUN = "NPV_preview_sun"
 PREVIEW_MAT_TMP = "NPV_preview_tmp_mat"
 GEO_CLAY_MAT = "NPV_geo_clay"
+GEO_WORLD_STRENGTH = 0.25
+GEO_SUN_STRENGTH = 4.0
+GEO_SUN_DIR = Vector((0.3, -0.6, 0.9)).normalized()  # towards the light
 
 SHADER_OUTPUT_NODES = {"ShaderNodeOutputMaterial", "ShaderNodeOutputWorld",
                        "ShaderNodeOutputLight"}
@@ -584,8 +587,15 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
     if node is None or not any(s.type == "GEOMETRY" for s in node.outputs):
         return None
 
+    # Fixed clay lighting (the World / Key Light sliders are for shader balls):
+    # a dim uniform world plus a key light hitting the three camera-facing
+    # faces at clearly different angles, so shapes read in 3D instead of as a
+    # flat, near-white silhouette.
     scn, plane, sphere = ensure_preview_scene(
-        res, props.world_strength, props.sun_strength, _engine_id(props))
+        res, GEO_WORLD_STRENGTH, GEO_SUN_STRENGTH, _engine_id(props))
+    sun = bpy.data.objects.get(PREVIEW_SUN)
+    if sun is not None:
+        sun.rotation_euler = GEO_SUN_DIR.to_track_quat('Z', 'Y').to_euler()
     plane.hide_render = True
     sphere.hide_render = True
 
@@ -621,7 +631,14 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
             return None
         for l in list(goin.links):
             ng2.links.remove(l)
-        ng2.links.new(gos, goin)
+        # Geometry created inside the tree (Mesh Cube, ...) carries its own
+        # (empty) material list, so the object-data material below never
+        # reaches it and it renders with Blender's default surface. Force the
+        # clay material in the tree itself.
+        setm = ng2.nodes.new("GeometryNodeSetMaterial")
+        setm.inputs["Material"].default_value = mat
+        ng2.links.new(gos, setm.inputs["Geometry"])
+        ng2.links.new(setm.outputs["Geometry"], goin)
 
         scn.collection.objects.link(obj2)
         obj2.location = (0, 0, 0)

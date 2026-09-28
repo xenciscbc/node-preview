@@ -86,6 +86,23 @@ def test_geometry_renders_without_leaks(mod):
         _remove_geo(ob, ng)
 
 
+def test_geometry_clay_render_is_shaded(mod):
+    # Regression: generated geometry skipped the clay material and rendered
+    # as a flat, fully clipped white silhouette.
+    ob, ng = _geo_object()
+    try:
+        with capture_renders(mod) as shots:
+            assert mod.render_geo(ob, "Cube", 64, _props())
+    finally:
+        _remove_geo(ob, ng)
+    lum = sorted(sum(p) / 3 for p in opaque_rgb(shots[0]))
+    n = len(lum)
+    clipped = sum(1 for v in lum if v >= 0.99) / n
+    spread = lum[9 * n // 10] - lum[n // 10]
+    assert clipped < 0.05, "clay render is overexposed (%.0f%% clipped)" % (clipped * 100)
+    assert spread > 0.15, "clay render has no shading (p90-p10 = %.3f)" % spread
+
+
 def test_geometry_field_swatch_has_texture(mod):
     ob, ng = _geo_object()
     try:
