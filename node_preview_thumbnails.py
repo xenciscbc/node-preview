@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 6),
+    "version": (1, 1, 7),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",
@@ -386,6 +386,11 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     scn = bpy.data.scenes.get(PREVIEW_SCENE)
     if scn is None:
         scn = bpy.data.scenes.new(PREVIEW_SCENE)
+    # Render at the user's current frame (animated geometry, drivers, keyed
+    # material values), not the preview scene's own frame 1.
+    user_scene = bpy.context.scene
+    if user_scene is not None and user_scene != scn:
+        scn.frame_current = user_scene.frame_current
     try:
         scn.render.engine = engine
     except TypeError:
@@ -560,12 +565,21 @@ def _frame_object(scn, cam, obj):
     cam.data.ortho_scale = max(radius * 2.3, 0.2)
 
 
-def render_geometry(obj, node_name, res, props, out_id=None):
-    mod = next((m for m in obj.modifiers
-                if m.type == 'NODES' and m.node_group is not None), None)
-    if mod is None:
+def _geo_modifier_index(obj, tree=None):
+    """Index of the Geometry Nodes modifier using ``tree`` (the first GN
+    modifier when ``tree`` is None), or None."""
+    for i, m in enumerate(obj.modifiers):
+        if m.type == 'NODES' and m.node_group is not None \
+                and (tree is None or m.node_group == tree):
+            return i
+    return None
+
+
+def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
+    idx = _geo_modifier_index(obj, tree)
+    if idx is None:
         return None
-    tree = mod.node_group
+    tree = obj.modifiers[idx].node_group
     node = tree.nodes.get(node_name)
     if node is None or not any(s.type == "GEOMETRY" for s in node.outputs):
         return None
@@ -587,8 +601,13 @@ def render_geometry(obj, node_name, res, props, out_id=None):
         if bsdf:
             bsdf.inputs["Base Color"].default_value = (0.6, 0.6, 0.62, 1.0)
     try:
-        m2 = next(m for m in obj2.modifiers if m.type == 'NODES')
+        m2 = obj2.modifiers[idx]
         m2.node_group = ng2
+        # Show the geometry at the previewed node: later modifiers (another GN
+        # modifier could replace the geometry entirely) must not run on top.
+        for later in list(obj2.modifiers)[idx + 1:]:
+            later.show_viewport = False
+            later.show_render = False
         tgt = ng2.nodes.get(node_name)
         go = next((n for n in ng2.nodes if n.bl_idname == "NodeGroupOutput"), None)
         gos = None
@@ -735,17 +754,19 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
             pass
 
 
-def render_geo(obj, node_name, res, props, out_id=None):
+def render_geo(obj, node_name, res, props, out_id=None, tree=None):
     """Dispatch a Geometry-node preview: a 3D render for geometry-output nodes,
-    a flat swatch for field-producing ShaderNodes."""
-    tree = _geo_tree_of(obj)
+    a flat swatch for field-producing ShaderNodes. ``tree`` is the edited node
+    tree (an object can carry several GN modifiers); defaults to the first."""
+    if tree is None:
+        tree = _geo_tree_of(obj)
     if tree is None:
         return None
     node = tree.nodes.get(node_name)
     if node is None:
         return None
     if any(s.type == "GEOMETRY" for s in node.outputs):
-        return render_geometry(obj, node_name, res, props, out_id)
+        return render_geometry(obj, node_name, res, props, out_id, tree)
     return render_geo_swatch(obj, node_name, res, props, out_id, tree)
 
 
@@ -804,6 +825,17 @@ def render_compositor(scene, node_name, res, props, out_id=None):
             pass
         r.use_compositing = True
         r.film_transparent = True
+        # The copy inherits the user's final-render quality (e.g. 4096 Cycles
+        # samples); every compositor node renders the scene once, on the UI
+        # thread, so keep each preview render cheap.
+        r.use_motion_blur = False
+        try:
+            if r.engine == "CYCLES":
+                tmp.cycles.samples = min(tmp.cycles.samples, 16)
+            else:
+                tmp.eevee.taa_render_samples = min(tmp.eevee.taa_render_samples, 16)
+        except Exception:
+            pass
         return _png_to_texture(_render_scene(tmp))
     finally:
         try:
@@ -1030,8 +1062,9 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force):
                 it["hash"] = h
                 break
         return
-    _state["queue"].append({"kind": kind, "src": src[1], "node": node_name,
-                            "out": out_id, "key": key, "hash": h})
+    _state["queue"].append({"kind": kind, "src": src[1], "tree": tree.name,
+                            "node": node_name, "out": out_id, "key": key,
+                            "hash": h})
     _state["queued_keys"].add(key)
 
 
@@ -1039,7 +1072,8 @@ def rebuild_queue(tree, kind, props, force=False):
     src = resolve_source(tree, kind)
     if src is None:
         return
-    esig = _engine_id(props)
+    # Resolution is part of the signature so a Quality change re-renders.
+    esig = _engine_id(props) + "|" + props.resolution
     lsig = _light_sig(props)
     memo = {}
     for node in tree.nodes:
@@ -1083,7 +1117,9 @@ def process_queue(props):
                     tex = render_world(w, item["node"], res, props, oid) if w else None
                 elif k == KIND_GEO:
                     o = bpy.data.objects.get(item["src"])
-                    tex = render_geo(o, item["node"], res, props, oid) if o else None
+                    t = bpy.data.node_groups.get(item.get("tree") or "")
+                    tex = render_geo(o, item["node"], res, props, oid, t) \
+                        if o and t else None
                 elif k == KIND_COMP:
                     s = bpy.data.scenes.get(item["src"])
                     tex = render_compositor(s, item["node"], res, props, oid) if s else None
@@ -1165,7 +1201,17 @@ def _on_load_post(_filepath):
     _state["rendering"] = False
     _state["timer_running"] = False
     _state["dirty"] = True
+    # Files saved by versions before 1.1.7 carry the preview scene; drop it so
+    # it doesn't show up in the scene list (rebuilt on demand).
+    _cleanup_datablocks()
     _ensure_timer()
+
+
+@persistent
+def _on_save_pre(_filepath):
+    """Keep the preview scene / objects out of the user's .blend. They are
+    rebuilt on the next preview render."""
+    _cleanup_datablocks()
 
 
 # --------------------------------------------------------------------------- #
@@ -1558,7 +1604,7 @@ class NPVProps(bpy.types.PropertyGroup):
         name="Quality",
         items=[("64", "Low (64px)", ""), ("128", "Medium (128px)", ""),
                ("256", "High (256px)", "")],
-        default="128")
+        default="128", update=_mark_dirty)
     batch_size: bpy.props.IntProperty(name="Nodes / Tick", default=2, min=1, max=8)
     shader_shape: bpy.props.EnumProperty(
         name="Shader Shape",
@@ -1851,6 +1897,8 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_save_pre not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_on_save_pre)
     _state["dirty"] = True
     _ensure_timer()
 
@@ -1873,6 +1921,8 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if _on_save_pre in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_on_save_pre)
     if bpy.app.timers.is_registered(_timer):
         try:
             bpy.app.timers.unregister(_timer)

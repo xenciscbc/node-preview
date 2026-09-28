@@ -10,6 +10,7 @@ def _assert_registered(mod):
     h = bpy.app.handlers
     assert _count(h.depsgraph_update_post, mod._on_depsgraph) == 1, "depsgraph handler count != 1"
     assert _count(h.load_post, mod._on_load_post) == 1, "load_post handler count != 1"
+    assert _count(h.save_pre, mod._on_save_pre) == 1, "save_pre handler count != 1"
     assert bpy.app.timers.is_registered(mod._timer), "preview timer not registered"
     assert hasattr(bpy.types.Scene, "npv"), "Scene.npv missing"
 
@@ -20,6 +21,7 @@ def test_register_unregister_cycle(mod):
     h = bpy.app.handlers
     assert _count(h.depsgraph_update_post, mod._on_depsgraph) == 0
     assert _count(h.load_post, mod._on_load_post) == 0
+    assert _count(h.save_pre, mod._on_save_pre) == 0
     assert not bpy.app.timers.is_registered(mod._timer), "timer left running"
     assert not hasattr(bpy.types.Scene, "npv"), "Scene.npv left behind"
     assert mod._state["draw_handle"] is None
