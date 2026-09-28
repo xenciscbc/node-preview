@@ -33,7 +33,7 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 
 ### As a Blender Extension (Blender 5.2+)
 `Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.1.5.zip`.
+`dist/node_preview-1.1.6.zip`.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -51,7 +51,7 @@ extension/
   __init__.py                     Extension entry — generated from the .py above
                                   with the bl_info block removed
 dist/
-  node_preview-1.1.5.zip   Packaged extension (manifest + __init__.py)
+  node_preview-1.1.6.zip   Packaged extension (manifest + __init__.py)
 build_extension.py                Rebuilds the extension zip from the source .py
 ```
 
@@ -67,6 +67,18 @@ python build_extension.py
 
 to regenerate `extension/__init__.py` and `dist/node_preview_thumbnails-<ver>.zip`.
 
+## Tests
+
+Headless suite, run in Blender 5.2 (`BLENDER` env var overrides the binary):
+
+```
+python run_tests.py                          # against node_preview_thumbnails.py
+python run_tests.py extension/__init__.py    # against the built extension
+```
+
+Checks that need the real node-editor UI are listed in
+`tests/gui_checklist.md`.
+
 ## Publishing to extensions.blender.org
 
 Before submitting, edit `extension/blender_manifest.toml`:
@@ -76,7 +88,7 @@ Before submitting, edit `extension/blender_manifest.toml`:
 Validate locally with:
 
 ```
-blender --command extension validate dist/node_preview-1.1.5.zip
+blender --command extension validate dist/node_preview-1.1.6.zip
 ```
 
 ## License

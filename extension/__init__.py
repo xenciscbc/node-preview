@@ -347,6 +347,30 @@ def tree_signature(tree):
 # --------------------------------------------------------------------------- #
 #  Preview scene
 # --------------------------------------------------------------------------- #
+def _new_uv_mesh(name, build):
+    """Mesh built by ``build(bm)`` with a UV layer. bmesh ``calc_uvs`` only
+    fills an existing UV layer; it never creates one."""
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bm.loops.layers.uv.new("UVMap")
+    build(bm)
+    bm.to_mesh(me)
+    bm.free()
+    return me
+
+
+def _drop_if_no_uv(obj):
+    """Remove a preview object left by an older version without UVs (image
+    textures would sample a single texel); returns None so it gets rebuilt."""
+    if obj is None or getattr(obj.data, "uv_layers", None):
+        return obj
+    me = obj.data
+    bpy.data.objects.remove(obj)
+    if me is not None and me.users == 0:
+        bpy.data.meshes.remove(me)
+    return None
+
+
 def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
                          engine="BLENDER_EEVEE"):
     scn = bpy.data.scenes.get(PREVIEW_SCENE)
@@ -390,13 +414,10 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     bg.inputs[0].default_value = (1, 1, 1, 1)
     bg.inputs[1].default_value = world_strength
 
-    plane = bpy.data.objects.get(PREVIEW_PLANE)
+    plane = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_PLANE))
     if plane is None:
-        me = bpy.data.meshes.new(PREVIEW_PLANE + "_mesh")
-        bm = bmesh.new()
-        bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=1.0, calc_uvs=True)
-        bm.to_mesh(me)
-        bm.free()
+        me = _new_uv_mesh(PREVIEW_PLANE + "_mesh", lambda bm: bmesh.ops.create_grid(
+            bm, x_segments=1, y_segments=1, size=1.0, calc_uvs=True))
         plane = bpy.data.objects.new(PREVIEW_PLANE, me)
     if plane.name not in scn.collection.objects:
         scn.collection.objects.link(plane)
@@ -404,13 +425,10 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     plane.rotation_euler = (0, 0, 0)
     plane.scale = (1.04, 1.04, 1.0)
 
-    sphere = bpy.data.objects.get(PREVIEW_SPHERE)
+    sphere = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_SPHERE))
     if sphere is None:
-        me = bpy.data.meshes.new(PREVIEW_SPHERE + "_mesh")
-        bm = bmesh.new()
-        bmesh.ops.create_uvsphere(bm, u_segments=48, v_segments=24, radius=0.92, calc_uvs=True)
-        bm.to_mesh(me)
-        bm.free()
+        me = _new_uv_mesh(PREVIEW_SPHERE + "_mesh", lambda bm: bmesh.ops.create_uvsphere(
+            bm, u_segments=48, v_segments=24, radius=0.92, calc_uvs=True))
         for poly in me.polygons:
             poly.use_smooth = True
         sphere = bpy.data.objects.new(PREVIEW_SPHERE, me)
