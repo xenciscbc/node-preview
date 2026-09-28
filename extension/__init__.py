@@ -91,6 +91,7 @@ _state = {
     "draw_handle": None, "textures": {}, "hashes": {}, "queue": [],
     "queued_keys": set(), "dirty": True, "rendering": False,
     "timer_running": False, "active_tree_ptr": None, "active_kind": None,
+    "active_path": None,  # editor tree path (pointers, outermost first)
     "shader_image": None, "sel_sig": None,
     "img_gen": {},        # image name -> update counter (texture paint)
     "tex_tick": {},       # texture key -> last-used tick (cache eviction)
@@ -227,6 +228,9 @@ def _shader_eligible(node, only_tex_shader):
         return True
     if any(s.type == "SHADER" for s in node.outputs):
         return True
+    if node.type == "GROUP":
+        # A node group is usually a texture / shading building block.
+        return any(s.type in {"RGBA", "VECTOR", "VALUE"} for s in node.outputs)
     return idn in COLOR_VECTOR_NODES
 
 
@@ -525,20 +529,125 @@ def _render_scene(scn):
 # --------------------------------------------------------------------------- #
 #  Renderers
 # --------------------------------------------------------------------------- #
-def render_shader(src_mat, node_name, res, props, out_id=None):
+# --------------------------------------------------------------------------- #
+#  Node groups
+# --------------------------------------------------------------------------- #
+def _instance_chain(path):
+    """Names of the group nodes leading through ``path`` (the editor's tree
+    path, outermost first): for each parent tree, the group node that uses the
+    next tree -- the active one if it qualifies (Tab enters the active group),
+    else the first. [] for a top-level tree, None if the path is broken."""
+    names = []
+    for parent, child in zip(path, path[1:]):
+        cands = [n for n in parent.nodes
+                 if n.type == "GROUP" and getattr(n, "node_tree", None) == child]
+        if not cands:
+            return None
+        act = parent.nodes.active
+        names.append(act.name if act in cands else cands[0].name)
+    return names
+
+
+def _inputs_sig(node, memo):
+    """Fingerprint of what flows *into* ``node`` (not its own settings)."""
+    parts = []
+    for inp in node.inputs:
+        if inp.is_linked:
+            parts.append((inp.identifier, tuple(
+                (l.from_socket.identifier, upstream_hash(l.from_node, memo))
+                for l in inp.links)))
+        else:
+            parts.append((inp.identifier, _socket_default(inp)))
+    return tuple(parts)
+
+
+def _context_sig(src, path, chain):
+    """For a node inside a group: the source data-block plus the inputs of
+    every enclosing group node, so entering the same group from another
+    material / with other inputs re-renders."""
+    parts = [src]
+    for parent, name in zip(path, chain):
+        inst = parent.nodes.get(name)
+        parts.append((name, _inputs_sig(inst, {}) if inst is not None else None))
+    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _geometry_out(node, out_id):
+    if node is None:
+        return None
+    s = None
+    if out_id:
+        s = next((o for o in node.outputs
+                  if o.identifier == out_id and o.type == "GEOMETRY"), None)
+    return s or next((o for o in node.outputs if o.type == "GEOMETRY"), None)
+
+
+def _route_out(top_tree, chain, node_name, pick):
+    """Expose a node inside nested groups at the top level of ``top_tree``
+    (which must already be a throwaway copy). Each group along ``chain`` is
+    copied and re-assigned, gets an extra output socket, and the node's output
+    (chosen by ``pick(node)``) is wired out level by level. Returns
+    (node, socket in top_tree or None, [copied groups to remove])."""
+    copies, insts = [], []
+    tree = top_tree
+    for name in chain:
+        inst = tree.nodes.get(name)
+        if inst is None or getattr(inst, "node_tree", None) is None:
+            return None, None, copies
+        g = inst.node_tree.copy()
+        copies.append(g)
+        inst.node_tree = g
+        insts.append(inst)
+        tree = g
+    node = tree.nodes.get(node_name)
+    sock = pick(node) if node is not None else None
+    if sock is None:
+        return node, None, copies
+    for g, inst in zip(reversed(copies), reversed(insts)):
+        stype = {"SHADER": "NodeSocketShader",
+                 "GEOMETRY": "NodeSocketGeometry"}.get(sock.type, "NodeSocketColor")
+        item = g.interface.new_socket("NPV Preview", in_out="OUTPUT", socket_type=stype)
+        outs = [n for n in g.nodes if n.bl_idname == "NodeGroupOutput"]
+        gout = next((n for n in outs if n.is_active_output), None) \
+            or (outs[0] if outs else g.nodes.new("NodeGroupOutput"))
+        gin = next((i for i in gout.inputs if i.identifier == item.identifier), None)
+        nxt = next((o for o in inst.outputs if o.identifier == item.identifier), None)
+        if gin is None or nxt is None:
+            return node, None, copies
+        g.links.new(sock, gin)
+        sock = nxt
+    return node, sock, copies
+
+
+def _remove_groups(groups):
+    for g in reversed(groups):
+        try:
+            bpy.data.node_groups.remove(g)
+        except Exception:
+            pass
+
+
+def render_shader(src_mat, node_name, res, props, out_id=None, chain=None):
     scn, plane, sphere = ensure_preview_scene(
         res, props.world_strength, props.sun_strength, _engine_id(props))
     prev = src_mat.copy()
     prev.name = PREVIEW_MAT_TMP
+    copies = []
     try:
         nt = prev.node_tree
-        node = nt.nodes.get(node_name)
-        if node is None:
-            return None
-        osock = _out_by_id(node, out_id)
-        is_shader = (node.bl_idname in SHADER_OUTPUT_NODES
-                     or (osock is not None and osock.type == "SHADER"))
-        if node.bl_idname not in SHADER_OUTPUT_NODES:
+        if chain:
+            node, osock, copies = _route_out(
+                nt, chain, node_name, lambda n: _out_by_id(n, out_id))
+            if osock is None:
+                return None
+        else:
+            node = nt.nodes.get(node_name)
+            if node is None:
+                return None
+            osock = _out_by_id(node, out_id)
+        is_output = node.bl_idname in SHADER_OUTPUT_NODES and not chain
+        is_shader = is_output or (osock is not None and osock.type == "SHADER")
+        if not is_output:
             out = next((n for n in nt.nodes
                         if n.bl_idname == "ShaderNodeOutputMaterial"), None) \
                 or nt.nodes.new("ShaderNodeOutputMaterial")
@@ -567,6 +676,7 @@ def render_shader(src_mat, node_name, res, props, out_id=None):
             bpy.data.materials.remove(prev)
         except Exception:
             pass
+        _remove_groups(copies)
 
 
 def _frame_object(scn, cam, obj):
@@ -600,14 +710,17 @@ def _geo_modifier_index(obj, tree=None):
     return None
 
 
-def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
+def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=None):
+    """``tree`` is the modifier's tree; with ``chain`` (group-node names) the
+    node lives inside those nested groups."""
     idx = _geo_modifier_index(obj, tree)
     if idx is None:
         return None
     tree = obj.modifiers[idx].node_group
-    node = tree.nodes.get(node_name)
-    if node is None or not any(s.type == "GEOMETRY" for s in node.outputs):
-        return None
+    if not chain:
+        node = tree.nodes.get(node_name)
+        if node is None or not any(s.type == "GEOMETRY" for s in node.outputs):
+            return None
 
     # Fixed clay lighting (the World / Key Light sliders are for shader balls):
     # a dim uniform world plus a key light hitting the three camera-facing
@@ -632,6 +745,7 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
             bsdf.inputs["Base Color"].default_value = (0.6, 0.6, 0.62, 1.0)
+    copies = []
     try:
         m2 = obj2.modifiers[idx]
         m2.node_group = ng2
@@ -640,14 +754,12 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
         for later in list(obj2.modifiers)[idx + 1:]:
             later.show_viewport = False
             later.show_render = False
-        tgt = ng2.nodes.get(node_name)
+        if chain:
+            _n, gos, copies = _route_out(
+                ng2, chain, node_name, lambda n: _geometry_out(n, out_id))
+        else:
+            gos = _geometry_out(ng2.nodes.get(node_name), out_id)
         go = next((n for n in ng2.nodes if n.bl_idname == "NodeGroupOutput"), None)
-        gos = None
-        if out_id:
-            gos = next((s for s in tgt.outputs
-                        if s.identifier == out_id and s.type == "GEOMETRY"), None)
-        if gos is None:
-            gos = next((s for s in tgt.outputs if s.type == "GEOMETRY"), None)
         goin = next((i for i in go.inputs if i.type == "GEOMETRY"), None) if go else None
         if gos is None or goin is None:
             return None
@@ -684,6 +796,7 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
                 db.remove(d)
             except Exception:
                 pass
+        _remove_groups(copies)
 
 
 def _geo_tree_of(obj):
@@ -788,10 +901,13 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
             pass
 
 
-def render_geo(obj, node_name, res, props, out_id=None, tree=None):
+def render_geo(obj, node_name, res, props, out_id=None, tree=None, chain=None,
+               root=None):
     """Dispatch a Geometry-node preview: a 3D render for geometry-output nodes,
     a flat swatch for field-producing ShaderNodes. ``tree`` is the edited node
-    tree (an object can carry several GN modifiers); defaults to the first."""
+    tree (an object can carry several GN modifiers); defaults to the first.
+    Inside a node group, ``root`` is the modifier's tree and ``chain`` the
+    group nodes leading from it to ``tree``."""
     if tree is None:
         tree = _geo_tree_of(obj)
     if tree is None:
@@ -800,7 +916,8 @@ def render_geo(obj, node_name, res, props, out_id=None, tree=None):
     if node is None:
         return None
     if any(s.type == "GEOMETRY" for s in node.outputs):
-        return render_geometry(obj, node_name, res, props, out_id, tree)
+        return render_geometry(obj, node_name, res, props, out_id,
+                               root or tree, chain)
     return render_geo_swatch(obj, node_name, res, props, out_id, tree)
 
 
@@ -882,7 +999,7 @@ def render_compositor(scene, node_name, res, props, out_id=None):
             pass
 
 
-def render_world(world, node_name, res, props, out_id=None):
+def render_world(world, node_name, res, props, out_id=None, chain=None):
     scn, plane, sphere = ensure_preview_scene(
         res, props.world_strength, props.sun_strength, _engine_id(props))
     prevw = world.copy()
@@ -895,12 +1012,20 @@ def render_world(world, node_name, res, props, out_id=None):
              getattr(cd, "panorama_type", None),
              plane.hide_render, sphere.hide_render)
     helper = None
+    copies = []
+    routed = None
     try:
         wnt = prevw.node_tree
-        node = wnt.nodes.get(node_name)
+        if chain:
+            node, routed, copies = _route_out(
+                wnt, chain, node_name, lambda n: _out_by_id(n, out_id))
+            if routed is None:
+                return None
+        else:
+            node = wnt.nodes.get(node_name)
         if node is None:
             return None
-        out = node if node.bl_idname == "ShaderNodeOutputWorld" else \
+        out = node if node.bl_idname == "ShaderNodeOutputWorld" and not chain else \
             (next((n for n in wnt.nodes
                    if n.bl_idname == "ShaderNodeOutputWorld"), None)
              or wnt.nodes.new("ShaderNodeOutputWorld"))
@@ -917,7 +1042,7 @@ def render_world(world, node_name, res, props, out_id=None):
                 if sk is not None:
                     for l in list(sk.links):
                         wnt.links.remove(l)
-            osock = _out_by_id(node, out_id)
+            osock = routed or _out_by_id(node, out_id)
             if osock is None or volin is None:
                 return None
             wnt.links.new(osock, volin)
@@ -946,11 +1071,11 @@ def render_world(world, node_name, res, props, out_id=None):
             cam.rotation_euler = (1.5708, 0.0, 0.0)
         else:
             # Surface / texture / color node -> flat environment swatch.
-            if node.bl_idname != "ShaderNodeOutputWorld":
+            if node.bl_idname != "ShaderNodeOutputWorld" or chain:
                 surf = out.inputs["Surface"]
                 for l in list(surf.links):
                     wnt.links.remove(l)
-                osock = _out_by_id(node, out_id)
+                osock = routed or _out_by_id(node, out_id)
                 if osock is None:
                     return None
                 if osock.type == "SHADER":
@@ -1003,6 +1128,7 @@ def render_world(world, node_name, res, props, out_id=None):
             bpy.data.worlds.remove(prevw)
         except Exception:
             pass
+        _remove_groups(copies)
 
 
 # --------------------------------------------------------------------------- #
@@ -1038,29 +1164,31 @@ def resolve_source(tree, kind):
     return None
 
 
+def _tree_by_pointer(ptr):
+    """A live node tree (material / world tree or node group) by pointer."""
+    for m in bpy.data.materials:
+        if m.node_tree is not None and m.node_tree.as_pointer() == ptr:
+            return m.node_tree
+    for w in bpy.data.worlds:
+        if w.node_tree is not None and w.node_tree.as_pointer() == ptr:
+            return w.node_tree
+    for ng in bpy.data.node_groups:
+        if ng.as_pointer() == ptr:
+            return ng
+    return None
+
+
 def _resolve_active():
-    ptr = _state["active_tree_ptr"]
+    """(edited tree, kind, editor path) recorded by the last draw."""
     kind = _state["active_kind"]
-    if ptr is None or kind is None:
-        return None, None
-    if kind == KIND_SHADER:
-        for m in bpy.data.materials:
-            if m.node_tree is not None and m.node_tree.as_pointer() == ptr:
-                return m.node_tree, kind
-    elif kind == KIND_GEO:
-        for ng in bpy.data.node_groups:
-            if ng.bl_idname == KIND_GEO and ng.as_pointer() == ptr:
-                return ng, kind
-    elif kind == KIND_COMP:
-        for s in bpy.data.scenes:
-            g = getattr(s, "compositing_node_group", None)
-            if g is not None and g.as_pointer() == ptr:
-                return g, kind
-    elif kind == KIND_WORLD:
-        for w in bpy.data.worlds:
-            if w.node_tree is not None and w.node_tree.as_pointer() == ptr:
-                return w.node_tree, kind
-    return None, None
+    ptrs = _state["active_path"] or (
+        [_state["active_tree_ptr"]] if _state["active_tree_ptr"] else [])
+    if not ptrs or kind is None:
+        return None, None, None
+    path = [_tree_by_pointer(p) for p in ptrs]
+    if any(t is None for t in path):
+        return None, None, None
+    return path[-1], kind, path
 
 
 def _kind_enabled(kind, props):
@@ -1086,7 +1214,8 @@ def _light_sig(props):
     return "%s|%.4f|%.4f" % (props.shader_shape, props.world_strength, props.sun_strength)
 
 
-def _enqueue(kind, src, tree, node_name, out_id, key, h, force):
+def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
+             chain=None):
     if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
         return
     if key in _state["queued_keys"]:
@@ -1096,17 +1225,31 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force):
                 break
         return
     _state["queue"].append({"kind": kind, "src": src[1], "tree": tree.name,
+                            "root": (root or tree).name,
+                            "chain": list(chain or ()),
                             "node": node_name, "out": out_id, "key": key,
                             "hash": h})
     _state["queued_keys"].add(key)
 
 
-def rebuild_queue(tree, kind, props, force=False):
-    src = resolve_source(tree, kind)
+def rebuild_queue(tree, kind, props, force=False, path=None):
+    """Queue the eligible nodes of ``tree`` whose hash changed. ``path`` is the
+    editor's tree path (outermost first, ending with ``tree``); when it is
+    longer than one, ``tree`` is a node group entered from path[0]."""
+    path = list(path) if path else [tree]
+    if path[-1].as_pointer() != tree.as_pointer():
+        path = [tree]
+    chain = _instance_chain(path)
+    if chain is None or (chain and kind == KIND_COMP):
+        return
+    root = path[0]
+    src = resolve_source(root, kind)
     if src is None:
         return
     # Resolution is part of the signature so a Quality change re-renders.
     esig = _engine_id(props) + "|" + props.resolution
+    if chain:
+        esig += "|" + _context_sig(src, path, chain)
     lsig = _light_sig(props)
     memo = {}
     live = set()
@@ -1125,7 +1268,8 @@ def rebuild_queue(tree, kind, props, force=False):
         for out_id in _preview_targets(node, kind, props):
             key = _skey(tree, node.name, out_id)
             live.add(key)
-            _enqueue(kind, src, tree, node.name, out_id, key, h, force)
+            _enqueue(kind, src, tree, node.name, out_id, key, h, force,
+                     root, chain)
     # Thumbnails of this tree that are no longer shown (node deleted or
     # renamed, output switched, filtered out) only hold GPU memory.
     prefix = "%d:" % tree.as_pointer()
@@ -1157,9 +1301,18 @@ def _live_tree_pointers():
     return ptrs
 
 
+def _max_textures():
+    """The user's 'Max Cached Thumbnails' preference (MAX_TEXTURES when the
+    add-on's preferences aren't available)."""
+    try:
+        return int(bpy.context.preferences.addons[__name__].preferences.max_textures)
+    except Exception:
+        return MAX_TEXTURES
+
+
 def _prune_cache():
     """Drop thumbnails whose node tree no longer exists, then evict the least
-    recently used ones above MAX_TEXTURES."""
+    recently used ones above the cache limit."""
     live = _live_tree_pointers()
     for key in list(_state["textures"]):
         try:
@@ -1168,10 +1321,18 @@ def _prune_cache():
             ptr = None
         if ptr not in live:
             _drop_texture(key)
-    extra = len(_state["textures"]) - MAX_TEXTURES
+    extra = len(_state["textures"]) - _max_textures()
     if extra > 0:
+        # Never evict the editor's own thumbnails: they'd go blank, re-render
+        # on the next edit and get evicted again. If they alone exceed the
+        # limit, the cache stays above it until the user moves on.
+        active = _state["active_tree_ptr"]
+        keep = "%d:" % active if active else None
         tick = _state["tex_tick"]
-        for key in sorted(_state["textures"], key=lambda k: tick.get(k, 0))[:extra]:
+        victims = sorted((k for k in _state["textures"]
+                          if keep is None or not k.startswith(keep)),
+                         key=lambda k: tick.get(k, 0))
+        for key in victims[:extra]:
             _drop_texture(key)
 
 
@@ -1191,16 +1352,20 @@ def process_queue(props):
             k = item["kind"]
             oid = item.get("out")
             try:
+                chain = item.get("chain") or None
                 if k == KIND_SHADER:
                     m = bpy.data.materials.get(item["src"])
-                    tex = render_shader(m, item["node"], res, props, oid) if m else None
+                    tex = render_shader(m, item["node"], res, props, oid, chain) \
+                        if m else None
                 elif k == KIND_WORLD:
                     w = bpy.data.worlds.get(item["src"])
-                    tex = render_world(w, item["node"], res, props, oid) if w else None
+                    tex = render_world(w, item["node"], res, props, oid, chain) \
+                        if w else None
                 elif k == KIND_GEO:
                     o = bpy.data.objects.get(item["src"])
                     t = bpy.data.node_groups.get(item.get("tree") or "")
-                    tex = render_geo(o, item["node"], res, props, oid, t) \
+                    r = bpy.data.node_groups.get(item.get("root") or "") or t
+                    tex = render_geo(o, item["node"], res, props, oid, t, chain, r) \
                         if o and t else None
                 elif k == KIND_COMP:
                     s = bpy.data.scenes.get(item["src"])
@@ -1237,9 +1402,9 @@ def _timer():
         return None
     if _state["dirty"] and props.auto_update:
         _state["dirty"] = False
-        tree, kind = _resolve_active()
+        tree, kind, path = _resolve_active()
         if tree is not None and _kind_enabled(kind, props):
-            rebuild_queue(tree, kind, props, force=False)
+            rebuild_queue(tree, kind, props, force=False, path=path)
     if process_queue(props):
         _tag_node_editors()
     _state["prune_in"] -= 1
@@ -1294,6 +1459,7 @@ def _on_load_post(_filepath):
     _state["sel_sig"] = None
     _state["active_tree_ptr"] = None
     _state["active_kind"] = None
+    _state["active_path"] = None
     _state["rendering"] = False
     _state["timer_running"] = False
     _state["dirty"] = True
@@ -1397,13 +1563,21 @@ def draw_callback():
         return
 
     ptr = tree.as_pointer()
-    if _state["active_tree_ptr"] != ptr or _state["active_kind"] != kind:
+    # Tree path of the editor (outermost first): entering a node group adds
+    # the group's tree; the previews inside need the path back to the
+    # material / world / modifier.
+    path = [p.node_tree.as_pointer() for p in space.path if p.node_tree is not None]
+    if not path or path[-1] != ptr:
+        path = [ptr]
+    if (_state["active_tree_ptr"] != ptr or _state["active_kind"] != kind
+            or _state["active_path"] != path):
         # Switched to a different node tree / editor type: re-queue so an
         # enabled editor auto-refreshes once on switch (when Auto Update is on),
         # instead of waiting for a depsgraph update or a manual Refresh.
         _state["dirty"] = True
     _state["active_tree_ptr"] = ptr
     _state["active_kind"] = kind
+    _state["active_path"] = path
     _ensure_timer()
 
     # In 'Selected' scope, a selection change has no depsgraph update, so watch
@@ -1541,6 +1715,7 @@ TR = {
         "comp_note2": "Refresh to reflect 3D scene changes.",
         "refresh": "Refresh Previews",
         "rendering_fmt": "Rendering... %d left",
+        "cached_fmt": "Cached: %d / %d",
         "ctx_show": "Show Node Preview",
         "help_tip": "Explain what each option and button does",
         "help": [
@@ -1609,6 +1784,7 @@ TR = {
         "comp_note2": "按刷新以反映 3D 場景變動。",
         "refresh": "刷新預覽",
         "rendering_fmt": "算圖中… 剩 %d",
+        "cached_fmt": "快取：%d / %d",
         "ctx_show": "顯示節點預覽",
         "help_tip": "說明各選項與按鈕的作用",
         "help": [
@@ -1755,7 +1931,9 @@ class NPV_OT_refresh(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.npv
         sp = context.space_data
-        rebuild_queue(sp.edit_tree, space_kind(sp), props, force=True)
+        path = [p.node_tree for p in sp.path if p.node_tree is not None]
+        rebuild_queue(sp.edit_tree, space_kind(sp), props, force=True,
+                      path=path or None)
         _ensure_timer()
         self.report({"INFO"}, "Queued %d node previews" % len(_state["queue"]))
         return {"FINISHED"}
@@ -1918,13 +2096,42 @@ class NPV_PT_panel(bpy.types.Panel):
         if _state["queue"]:
             body.label(text=t("rendering_fmt") % len(_state["queue"]),
                        icon="SORTTIME")
+        body.label(text=t("cached_fmt") % (len(_state["textures"]), _max_textures()),
+                   icon="IMAGE_DATA")
 
 
 # --------------------------------------------------------------------------- #
 #  Register
 # --------------------------------------------------------------------------- #
-_classes = (NPVProps, NPV_OT_refresh, NPV_OT_mark, NPV_OT_clear, NPV_OT_help,
-            NPV_PT_panel)
+def _prefs_update(self, context):
+    _prune_cache()
+    _tag_node_editors()
+
+
+class NPVAddonPrefs(bpy.types.AddonPreferences):
+    # __name__ is the add-on's module: "node_preview_thumbnails" (legacy) or
+    # "bl_ext.<repo>.node_preview" (extension package).
+    bl_idname = __name__
+
+    max_textures: bpy.props.IntProperty(
+        name="Max Cached Thumbnails",
+        description="Thumbnails kept in GPU memory; the least recently shown are "
+                    "released above this (the node editor you are looking at always "
+                    "keeps its own). Approx. per 100 thumbnails: 3 MB at "
+                    "Low (64px), 13 MB at Medium (128px), 50 MB at High (256px)",
+        default=MAX_TEXTURES, min=16, max=4096, update=_prefs_update)
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "max_textures")
+        mb = {"64": 0.03125, "128": 0.125, "256": 0.5}
+        col.label(text="At the limit: ~%d MB (Low) / ~%d MB (Medium) / ~%d MB (High)" % tuple(
+            max(1, round(self.max_textures * mb[r])) for r in ("64", "128", "256")),
+            icon="INFO")
+
+
+_classes = (NPVProps, NPVAddonPrefs, NPV_OT_refresh, NPV_OT_mark, NPV_OT_clear,
+            NPV_OT_help, NPV_PT_panel)
 
 
 def _node_context_menu(self, context):
