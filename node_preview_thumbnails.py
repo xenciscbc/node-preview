@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 1, 8),
+    "version": (1, 1, 9),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/geometry/compositor).",
@@ -102,7 +102,11 @@ _state = {
     "queued_keys": set(), "dirty": True, "rendering": False,
     "timer_running": False, "active_tree_ptr": None, "active_kind": None,
     "shader_image": None, "sel_sig": None,
+    "img_gen": {},        # image name -> update counter (texture paint)
+    "tex_tick": {},       # texture key -> last-used tick (cache eviction)
+    "tick": 0, "prune_in": 0,
 }
+MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 
 
 def _key(tree, node_name):
@@ -295,7 +299,25 @@ _SKIP_PROPS = {
 }
 
 
-def _node_settings(node):
+def _image_sig(img):
+    """What makes an Image's pixels differ: a counter bumped by depsgraph
+    Image updates (texture paint), the unsaved-edits flag, the file's mtime
+    (reload after an external edit) and the generated-image settings."""
+    sig = [img.name, img.source, _state["img_gen"].get(img.name, 0),
+           bool(img.is_dirty)]
+    if img.source == "GENERATED":
+        sig += [img.generated_type, tuple(round(c, 5) for c in img.generated_color),
+                tuple(img.size)]
+    elif img.packed_file is None and img.filepath:
+        try:
+            sig.append(os.path.getmtime(
+                bpy.path.abspath(img.filepath, library=img.library)))
+        except (OSError, ValueError):
+            pass
+    return tuple(sig)
+
+
+def _node_settings(node, _seen=frozenset()):
     vals = []
     for p in node.bl_rna.properties:
         pid = p.identifier
@@ -304,7 +326,13 @@ def _node_settings(node):
         if p.type == "POINTER":
             try:
                 ref = getattr(node, pid)
-                vals.append((pid, ref.name if ref is not None else None))
+                if isinstance(ref, bpy.types.Image):
+                    vals.append((pid, _image_sig(ref)))
+                elif isinstance(ref, bpy.types.NodeTree):
+                    # Group node: its contents are part of its result.
+                    vals.append((pid, ref.name, tree_signature(ref, _seen)))
+                else:
+                    vals.append((pid, ref.name if ref is not None else None))
             except Exception:
                 pass
             continue
@@ -343,11 +371,16 @@ def upstream_hash(node, memo):
     return hv
 
 
-def tree_signature(tree):
-    """Whole-tree fingerprint for geometry / compositor change detection."""
+def tree_signature(tree, _seen=frozenset()):
+    """Whole-tree fingerprint, nested groups included. ``_seen`` holds the
+    trees already being walked so a malformed self-nesting can't recurse."""
+    ptr = tree.as_pointer()
+    if ptr in _seen:
+        return "cycle"
+    seen = _seen | {ptr}
     parts = []
     for n in tree.nodes:
-        parts.append((n.name, n.bl_idname, n.mute, _node_settings(n)))
+        parts.append((n.name, n.bl_idname, n.mute, _node_settings(n, seen)))
         for inp in n.inputs:
             if not inp.is_linked:
                 parts.append((n.name, inp.identifier, _socket_default(inp)))
@@ -421,7 +454,6 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
 
     if scn.world is None:
         scn.world = bpy.data.worlds.get("NPV_world") or bpy.data.worlds.new("NPV_world")
-    scn.world.use_nodes = True
     wnt = scn.world.node_tree
     bg = next((n for n in wnt.nodes if n.bl_idname == "ShaderNodeBackground"), None)
     if bg is None:
@@ -600,13 +632,13 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
     sphere.hide_render = True
 
     ng2 = tree.copy()
+    # obj.copy() shares the object data (mesh / curve / ...). It is never
+    # modified here -- the clay material goes in through the tree below -- so
+    # a (possibly huge) mesh isn't duplicated for every preview.
     obj2 = obj.copy()
-    data2 = obj.data.copy() if obj.data is not None else None
-    obj2.data = data2
     mat = bpy.data.materials.get(GEO_CLAY_MAT)
     if mat is None:
         mat = bpy.data.materials.new(GEO_CLAY_MAT)
-        mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
             bsdf.inputs["Base Color"].default_value = (0.6, 0.6, 0.62, 1.0)
@@ -631,10 +663,10 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
             return None
         for l in list(goin.links):
             ng2.links.remove(l)
-        # Geometry created inside the tree (Mesh Cube, ...) carries its own
-        # (empty) material list, so the object-data material below never
-        # reaches it and it renders with Blender's default surface. Force the
-        # clay material in the tree itself.
+        # Apply the clay material in the tree itself: it covers both the
+        # object's own mesh and geometry created inside the tree (Mesh Cube,
+        # ...), whose own empty material list would otherwise render with
+        # Blender's default surface.
         setm = ng2.nodes.new("GeometryNodeSetMaterial")
         setm.inputs["Material"].default_value = mat
         ng2.links.new(gos, setm.inputs["Geometry"])
@@ -643,8 +675,11 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
         scn.collection.objects.link(obj2)
         obj2.location = (0, 0, 0)
         obj2.rotation_euler = (0, 0, 0)
-        obj2.data.materials.clear()
-        obj2.data.materials.append(mat)
+        # Object-linked material slots would override the clay material; they
+        # belong to obj2 only, so this doesn't touch the user's object.
+        for slot in obj2.material_slots:
+            if slot.link == "OBJECT":
+                slot.material = mat
         obj2.hide_render = False
         _frame_object(scn, scn.camera, obj2)
         return _png_to_texture(_render_scene(scn))
@@ -657,13 +692,6 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None):
         for db, d in ((bpy.data.objects, obj2), (bpy.data.node_groups, ng2)):
             try:
                 db.remove(d)
-            except Exception:
-                pass
-        # The copied object data (mesh / curve / ...) is orphaned now; drop it
-        # so every geometry preview doesn't leave a "<mesh>.001" behind.
-        if data2 is not None:
-            try:
-                bpy.data.batch_remove([data2])
             except Exception:
                 pass
 
@@ -739,7 +767,6 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
     scn, plane, sphere = ensure_preview_scene(
         res, props.world_strength, props.sun_strength, _engine_id(props))
     m = bpy.data.materials.new(PREVIEW_MAT_TMP)
-    m.use_nodes = True
     try:
         nt = m.node_tree
         for n in list(nt.nodes):
@@ -910,7 +937,6 @@ def render_world(world, node_name, res, props, out_id=None):
             clay = bpy.data.materials.get(GEO_CLAY_MAT)
             if clay is None:
                 clay = bpy.data.materials.new(GEO_CLAY_MAT)
-                clay.use_nodes = True
                 b = clay.node_tree.nodes.get("Principled BSDF")
                 if b:
                     b.inputs["Base Color"].default_value = (0.6, 0.6, 0.62, 1.0)
@@ -994,7 +1020,7 @@ def render_world(world, node_name, res, props, out_id=None):
 # --------------------------------------------------------------------------- #
 def find_material_for_tree(tree):
     for m in bpy.data.materials:
-        if m.use_nodes and m.node_tree is not None and m.node_tree == tree:
+        if m.node_tree is not None and m.node_tree == tree:
             return m
     return None
 
@@ -1016,7 +1042,7 @@ def resolve_source(tree, kind):
         return None
     if kind == KIND_WORLD:
         for w in bpy.data.worlds:
-            if w.use_nodes and w.node_tree is not None and w.node_tree == tree:
+            if w.node_tree is not None and w.node_tree == tree:
                 return ("WORLD", w.name)
         return None
     return None
@@ -1029,7 +1055,7 @@ def _resolve_active():
         return None, None
     if kind == KIND_SHADER:
         for m in bpy.data.materials:
-            if m.use_nodes and m.node_tree is not None and m.node_tree.as_pointer() == ptr:
+            if m.node_tree is not None and m.node_tree.as_pointer() == ptr:
                 return m.node_tree, kind
     elif kind == KIND_GEO:
         for ng in bpy.data.node_groups:
@@ -1042,7 +1068,7 @@ def _resolve_active():
                 return g, kind
     elif kind == KIND_WORLD:
         for w in bpy.data.worlds:
-            if w.use_nodes and w.node_tree is not None and w.node_tree.as_pointer() == ptr:
+            if w.node_tree is not None and w.node_tree.as_pointer() == ptr:
                 return w.node_tree, kind
     return None, None
 
@@ -1093,6 +1119,7 @@ def rebuild_queue(tree, kind, props, force=False):
     esig = _engine_id(props) + "|" + props.resolution
     lsig = _light_sig(props)
     memo = {}
+    live = set()
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
             continue
@@ -1107,7 +1134,55 @@ def rebuild_queue(tree, kind, props, force=False):
         h = hashlib.md5((h + extra).encode("utf-8", "replace")).hexdigest()
         for out_id in _preview_targets(node, kind, props):
             key = _skey(tree, node.name, out_id)
+            live.add(key)
             _enqueue(kind, src, tree, node.name, out_id, key, h, force)
+    # Thumbnails of this tree that are no longer shown (node deleted or
+    # renamed, output switched, filtered out) only hold GPU memory.
+    prefix = "%d:" % tree.as_pointer()
+    for key in [k for k in _state["textures"] if k.startswith(prefix) and k not in live]:
+        _drop_texture(key)
+
+
+def _touch(key):
+    _state["tick"] += 1
+    _state["tex_tick"][key] = _state["tick"]
+
+
+def _drop_texture(key):
+    _state["textures"].pop(key, None)
+    _state["hashes"].pop(key, None)
+    _state["tex_tick"].pop(key, None)
+
+
+def _live_tree_pointers():
+    ptrs = set()
+    for m in bpy.data.materials:
+        if m.node_tree is not None:
+            ptrs.add(m.node_tree.as_pointer())
+    for w in bpy.data.worlds:
+        if w.node_tree is not None:
+            ptrs.add(w.node_tree.as_pointer())
+    for ng in bpy.data.node_groups:
+        ptrs.add(ng.as_pointer())
+    return ptrs
+
+
+def _prune_cache():
+    """Drop thumbnails whose node tree no longer exists, then evict the least
+    recently used ones above MAX_TEXTURES."""
+    live = _live_tree_pointers()
+    for key in list(_state["textures"]):
+        try:
+            ptr = int(key.split(":", 1)[0])
+        except ValueError:
+            ptr = None
+        if ptr not in live:
+            _drop_texture(key)
+    extra = len(_state["textures"]) - MAX_TEXTURES
+    if extra > 0:
+        tick = _state["tex_tick"]
+        for key in sorted(_state["textures"], key=lambda k: tick.get(k, 0))[:extra]:
+            _drop_texture(key)
 
 
 def process_queue(props):
@@ -1148,6 +1223,7 @@ def process_queue(props):
             if tex is not None:
                 _state["textures"][item["key"]] = tex
                 _state["hashes"][item["key"]] = item["hash"]
+                _touch(item["key"])
                 did = True
     finally:
         _state["rendering"] = False
@@ -1176,6 +1252,10 @@ def _timer():
             rebuild_queue(tree, kind, props, force=False)
     if process_queue(props):
         _tag_node_editors()
+    _state["prune_in"] -= 1
+    if _state["prune_in"] <= 0:
+        _state["prune_in"] = 20          # ~every 3 s
+        _prune_cache()
     return 0.15
 
 
@@ -1196,9 +1276,16 @@ def _on_depsgraph(scene, depsgraph):
     if props is None or not props.enabled or not props.auto_update:
         return
     for upd in depsgraph.updates:
-        if getattr(upd.id, "id_type", "") in {"MATERIAL", "NODETREE", "OBJECT"}:
+        idt = getattr(upd.id, "id_type", "")
+        if idt == "IMAGE":
+            # Texture paint sends Image updates; the counter is part of the
+            # image's hash so textures using it re-render.
+            name = upd.id.name
+            _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
             _state["dirty"] = True
-            break
+        elif idt in {"MATERIAL", "NODETREE", "OBJECT", "WORLD", "SCENE"}:
+            # SCENE: e.g. a render engine switch (part of the hash).
+            _state["dirty"] = True
 
 
 @persistent
@@ -1208,6 +1295,8 @@ def _on_load_post(_filepath):
     and survives the load; _ensure_timer() here is just a safety net in case
     it is gone for any other reason."""
     _state["textures"].clear()
+    _state["tex_tick"].clear()
+    _state["img_gen"].clear()
     _state["hashes"].clear()
     _state["queue"].clear()
     _state["queued_keys"].clear()
@@ -1363,8 +1452,10 @@ def draw_callback():
             continue
         cells = []
         for oid in _preview_targets(node, kind, props):
-            t = _state["textures"].get(_skey(tree, node.name, oid))
+            k = _skey(tree, node.name, oid)
+            t = _state["textures"].get(k)
             if t is not None:
+                _touch(k)
                 cells.append((oid, t))
         if not cells:
             continue
@@ -1713,6 +1804,8 @@ class NPV_OT_clear(bpy.types.Operator):
 
     def execute(self, context):
         _state["textures"].clear()
+        _state["tex_tick"].clear()
+        _state["img_gen"].clear()
         _state["hashes"].clear()
         _state["queue"].clear()
         _state["queued_keys"].clear()
@@ -1953,6 +2046,8 @@ def unregister():
             pass
         _state["draw_handle"] = None
     _state["textures"].clear()
+    _state["tex_tick"].clear()
+    _state["img_gen"].clear()
     _state["hashes"].clear()
     _state["queue"].clear()
     _state["queued_keys"].clear()
