@@ -13,6 +13,7 @@ import traceback
 import bpy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)  # for npv_testutil
 
 
 def _load_addon(path):

@@ -567,7 +567,8 @@ def render_geometry(obj, node_name, res, props, out_id=None):
 
     ng2 = tree.copy()
     obj2 = obj.copy()
-    obj2.data = obj.data.copy()
+    data2 = obj.data.copy() if obj.data is not None else None
+    obj2.data = data2
     mat = bpy.data.materials.get(GEO_CLAY_MAT)
     if mat is None:
         mat = bpy.data.materials.new(GEO_CLAY_MAT)
@@ -610,6 +611,13 @@ def render_geometry(obj, node_name, res, props, out_id=None):
         for db, d in ((bpy.data.objects, obj2), (bpy.data.node_groups, ng2)):
             try:
                 db.remove(d)
+            except Exception:
+                pass
+        # The copied object data (mesh / curve / ...) is orphaned now; drop it
+        # so every geometry preview doesn't leave a "<mesh>.001" behind.
+        if data2 is not None:
+            try:
+                bpy.data.batch_remove([data2])
             except Exception:
                 pass
 
@@ -1792,8 +1800,11 @@ def _cleanup_datablocks():
                  "NPV_vol_light"):
         o = bpy.data.objects.get(name)
         if o is not None:
+            data = o.data
             try:
                 bpy.data.objects.remove(o)
+                if data is not None and data.users == 0:
+                    bpy.data.batch_remove([data])
             except Exception:
                 pass
     for name in (PREVIEW_PREV_WORLD, "NPV_world"):

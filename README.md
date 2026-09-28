@@ -65,7 +65,15 @@ Run:
 python build_extension.py
 ```
 
-to regenerate `extension/__init__.py` and `dist/node_preview_thumbnails-<ver>.zip`.
+to regenerate `extension/__init__.py` and `dist/node_preview-<ver>.zip`.
+
+The build is gated; nothing is written unless all of these pass:
+1. `bl_info` version equals the manifest version and is newer than every other
+   zip in `dist/`.
+2. The headless test suite passes against the stripped extension code.
+3. `blender --command extension validate` accepts the zip.
+
+`--no-test` skips step 2 (prints a warning); don't use it for a release.
 
 ## Tests
 

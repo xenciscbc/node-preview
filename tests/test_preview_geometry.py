@@ -2,26 +2,11 @@
 import bmesh
 import bpy
 
+from npv_testutil import capture_renders, color_std
+
 
 def _uv_names(obj):
     return [l.name for l in obj.data.uv_layers]
-
-
-def _pixel_stats(path):
-    """Mean per-channel std-dev of the opaque pixels of a rendered PNG."""
-    img = bpy.data.images.load(path, check_existing=False)
-    try:
-        px = img.pixels[:]
-    finally:
-        bpy.data.images.remove(img)
-    rgb = [px[i:i + 3] for i in range(0, len(px), 4) if px[i + 3] > 0.5]
-    assert rgb, "render has no opaque pixels"
-    n = len(rgb)
-    devs = []
-    for c in range(3):
-        mean = sum(p[c] for p in rgb) / n
-        devs.append((sum((p[c] - mean) ** 2 for p in rgb) / n) ** 0.5)
-    return sum(devs) / 3
 
 
 def test_preview_meshes_have_uv(mod):
@@ -49,15 +34,12 @@ def test_image_texture_thumbnail_is_not_flat(mod):
     mat = bpy.data.materials.new("NPV_test_mat")
     tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
     tex.image = img
-    captured = {}
-    orig = mod._png_to_texture
-    mod._png_to_texture = lambda path: captured.setdefault("std", _pixel_stats(path))
     try:
-        mod.render_shader(mat, tex.name, 64, bpy.context.scene.npv)
+        with capture_renders(mod) as shots:
+            mod.render_shader(mat, tex.name, 64, bpy.context.scene.npv)
     finally:
-        mod._png_to_texture = orig
         bpy.data.materials.remove(mat)
         bpy.data.images.remove(img)
-    assert "std" in captured, "render_shader did not render"
-    assert captured["std"] > 0.05, (
-        "image texture thumbnail is a flat colour (std=%.4f)" % captured["std"])
+    assert shots, "render_shader did not render"
+    std = color_std(shots[0])
+    assert std > 0.05, "image texture thumbnail is a flat colour (std=%.4f)" % std
