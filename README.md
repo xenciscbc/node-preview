@@ -53,6 +53,9 @@ extension/
 dist/
   node_preview-1.1.6.zip   Packaged extension (manifest + __init__.py)
 build_extension.py                Rebuilds the extension zip from the source .py
+                                  (gated on the tests below)
+run_tests.py                      Runs tests/ in headless Blender
+tests/                            Headless tests + GUI checklist
 ```
 
 ## Build the extension from source
