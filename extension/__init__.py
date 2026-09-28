@@ -360,6 +360,9 @@ def upstream_hash(node, memo):
             parts.append(("L", inp.identifier, tuple(srcs)))
         else:
             parts.append(("D", inp.identifier, _socket_default(inp)))
+    # RGB / Value nodes keep their value in an output socket.
+    for out in node.outputs:
+        parts.append(("O", out.identifier, _socket_default(out)))
     hv = hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
     memo[ptr] = hv
     return hv
@@ -378,6 +381,8 @@ def tree_signature(tree, _seen=frozenset()):
         for inp in n.inputs:
             if not inp.is_linked:
                 parts.append((n.name, inp.identifier, _socket_default(inp)))
+        for out in n.outputs:  # RGB / Value nodes
+            parts.append((n.name, "O", out.identifier, _socket_default(out)))
     for l in tree.links:
         parts.append((l.from_node.name, l.from_socket.identifier,
                       l.to_node.name, l.to_socket.identifier))
@@ -921,7 +926,7 @@ def render_geo(obj, node_name, res, props, out_id=None, tree=None, chain=None,
     return render_geo_swatch(obj, node_name, res, props, out_id, tree)
 
 
-def render_compositor(scene, node_name, res, props, out_id=None):
+def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
     # Blender 5.2's new compositor evaluates only its designated output during
     # a render (the Viewer image comes from the realtime GPU compositor, which
     # a headless render does not drive). So to preview a node we temporarily
@@ -932,21 +937,31 @@ def render_compositor(scene, node_name, res, props, out_id=None):
     # node in the rendered tree overwrites the shared "Viewer Node" image, both
     # at thumbnail size. Scene.copy() links objects/collections (cheap) but
     # shares the compositor tree, so the tree is copied separately.
+    # Inside a node group, ``chain`` names the group nodes leading from the
+    # scene's tree to the node; _route_out wires it out through copies of
+    # those groups.
     src_tree = getattr(scene, "compositing_node_group", None)
-    if src_tree is None or src_tree.nodes.get(node_name) is None:
+    if src_tree is None or (not chain and src_tree.nodes.get(node_name) is None):
         return None
     tmp = scene.copy()
     tree = src_tree.copy()
+    copies = []
     try:
         tmp.compositing_node_group = tree
-        for n in list(tree.nodes):
-            if n.bl_idname in ("CompositorNodeViewer", "CompositorNodeOutputFile"):
-                tree.nodes.remove(n)
-            elif (n.bl_idname == "CompositorNodeRLayers"
-                  and getattr(n, "scene", None) == scene):
-                n.scene = tmp
-        node = tree.nodes.get(node_name)
-        out = _out_by_id(node, out_id) if node is not None else None
+        if chain:
+            node, out, copies = _route_out(
+                tree, chain, node_name, lambda n: _out_by_id(n, out_id))
+        else:
+            node = tree.nodes.get(node_name)
+            out = _out_by_id(node, out_id) if node is not None else None
+        # (A Viewer / File Output node has no outputs, so ``out`` survives.)
+        for t in [tree] + copies:
+            for n in list(t.nodes):
+                if n.bl_idname in ("CompositorNodeViewer", "CompositorNodeOutputFile"):
+                    t.nodes.remove(n)
+                elif (n.bl_idname == "CompositorNodeRLayers"
+                      and getattr(n, "scene", None) == scene):
+                    n.scene = tmp
         if out is None:
             return None
         go = next((n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"), None)
@@ -997,6 +1012,7 @@ def render_compositor(scene, node_name, res, props, out_id=None):
             bpy.data.node_groups.remove(tree)
         except Exception:
             pass
+        _remove_groups(copies)
 
 
 def render_world(world, node_name, res, props, out_id=None, chain=None):
@@ -1240,8 +1256,12 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
     if path[-1].as_pointer() != tree.as_pointer():
         path = [tree]
     chain = _instance_chain(path)
-    if chain is None or (chain and kind == KIND_COMP):
+    if chain is None:
         return
+    # Compositor group previews can be switched off (each one renders the
+    # scene); with them off nothing is live, so the loop below is skipped and
+    # the group's old thumbnails are dropped.
+    skip = bool(chain) and kind == KIND_COMP and not getattr(props, "comp_groups", True)
     root = path[0]
     src = resolve_source(root, kind)
     if src is None:
@@ -1254,7 +1274,7 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
     memo = {}
     live = set()
     for node in tree.nodes:
-        if not node_eligible(node, kind, props):
+        if skip or not node_eligible(node, kind, props):
             continue
         try:
             h = upstream_hash(node, memo)
@@ -1369,7 +1389,8 @@ def process_queue(props):
                         if o and t else None
                 elif k == KIND_COMP:
                     s = bpy.data.scenes.get(item["src"])
-                    tex = render_compositor(s, item["node"], res, props, oid) if s else None
+                    tex = render_compositor(s, item["node"], res, props, oid, chain) \
+                        if s else None
                 else:
                     tex = None
             except Exception as exc:
@@ -1400,17 +1421,21 @@ def _timer():
     if props is None or not props.enabled:
         _state["timer_running"] = False
         return None
+    shown = len(_state["textures"])
     if _state["dirty"] and props.auto_update:
         _state["dirty"] = False
         tree, kind, path = _resolve_active()
         if tree is not None and _kind_enabled(kind, props):
             rebuild_queue(tree, kind, props, force=False, path=path)
-    if process_queue(props):
-        _tag_node_editors()
+    rendered = process_queue(props)
     _state["prune_in"] -= 1
     if _state["prune_in"] <= 0:
         _state["prune_in"] = 20          # ~every 3 s
         _prune_cache()
+    # Redraw after new renders, and after thumbnails were dropped (filtered
+    # out, node deleted, cache pruned) so they don't linger on screen.
+    if rendered or len(_state["textures"]) < shown:
+        _tag_node_editors()
     return 0.15
 
 
@@ -1717,45 +1742,87 @@ TR = {
         "rendering_fmt": "Rendering... %d left",
         "cached_fmt": "Cached: %d / %d",
         "ctx_show": "Show Node Preview",
+        "comp_groups": "Inside Node Groups",
+        "pref_limit_fmt": "At the limit: ~%d MB (Low) / ~%d MB (Medium) / ~%d MB (High)",
         "help_tip": "Explain what each option and button does",
-        "help": [
-            ("title", "Node Preview - what each control does"),
-            ("sec", "General"),
-            ("line", "Show Previews:  master on/off for all thumbnails."),
-            ("line", "Auto Update:  re-render a node when its inputs change."),
-            ("line", "Quality:  thumbnail resolution (64 / 128 / 256 px)."),
-            ("line", "Nodes / Tick:  previews rendered per step. Higher ="),
-            ("line", "        faster refresh but more stutter."),
-            ("line", "Engine:  follows the scene's Render Engine."),
-            ("sec", "Filtering (save resources)"),
-            ("line", "Only Texture / Shader Nodes:  skip Value / Math nodes."),
-            ("line", "Preview Scope:"),
-            ("line", "        All:  preview every eligible node."),
-            ("line", "        Selected:  only the nodes you select."),
-            ("line", "        Marked:  only nodes you switch on (right-click"),
-            ("line", "        > Show Node Preview, or Mark Sel / Unmark Sel)."),
-            ("sec", "Multi-output nodes (e.g. Texture Coordinate)"),
-            ("line", "Preview Socket:  which output the node previews"),
-            ("line", "        (Auto = first linked). Also on right-click menu."),
-            ("line", "Show All Linked Outputs:  preview every linked output"),
-            ("line", "        side by side in a 2-column grid."),
-            ("sec", "Shader Nodes (BSDF / Output)"),
-            ("line", "Sphere / Plane:  lit material ball, or a flat swatch."),
-            ("line", "World Light:  even environment brightness on the ball."),
-            ("line", "Key Light:  sun strength (Sphere only)."),
-            ("line", "Texture / color nodes always show a flat swatch."),
-            ("sec", "Other Editors (turn on to preview)"),
-            ("line", "World:  environment swatch; a volume node (fog) is"),
-            ("line", "        shown on a lit sphere instead."),
-            ("line", "Geometry Nodes:  a small 3D render of the geometry."),
-            ("line", "        Texture / Math Nodes (checkbox): also show a"),
-            ("line", "        flat swatch for texture / math / colour nodes."),
-            ("line", "Compositor:  each node's image. Renders the scene per"),
-            ("line", "        node, so it is heavier."),
-            ("sec", "Buttons"),
-            ("line", "Refresh:  re-render every node in the current editor."),
-            ("line", "Trash:  clear all cached thumbnails."),
+        "help_title": "Node Preview - what each control does",
+        "help_tabs": [
+            ("GENERAL", "General"), ("FILTER", "Filter"), ("OUTPUTS", "Outputs"),
+            ("SHADER", "Shader"), ("EDITORS", "Editors"),
+            ("GROUPS", "Groups"), ("CACHE", "Cache"),
         ],
+        "help": {
+            "GENERAL": [
+                ("line", "Show Previews:  master on/off for all thumbnails."),
+                ("line", "Auto Update:  re-render a node when its inputs change,"),
+                ("line", "        also after texture painting an image or"),
+                ("line", "        editing inside a node group."),
+                ("line", "Quality:  thumbnail resolution (64 / 128 / 256 px)."),
+                ("line", "Nodes / Tick:  previews rendered per step. Higher ="),
+                ("line", "        faster refresh but more stutter."),
+                ("line", "Engine:  follows the scene's Render Engine."),
+                ("sec", "Buttons"),
+                ("line", "Refresh:  re-render every node in the current editor."),
+                ("line", "Trash:  clear all cached thumbnails."),
+            ],
+            "FILTER": [
+                ("line", "Only Texture / Shader Nodes:  skip Value / Math nodes."),
+                ("line", "Preview Scope:"),
+                ("line", "        All:  preview every eligible node."),
+                ("line", "        Selected:  only the nodes you select."),
+                ("line", "        Marked:  only nodes you switch on (right-click"),
+                ("line", "        > Show Node Preview, or Mark Sel / Unmark Sel)."),
+            ],
+            "OUTPUTS": [
+                ("line", "For nodes with several outputs (e.g. Texture Coordinate):"),
+                ("line", "Preview Socket:  which output the node previews"),
+                ("line", "        (Auto = first linked). Also on right-click menu."),
+                ("line", "Show All Linked Outputs:  preview every linked output"),
+                ("line", "        side by side in a 2-column grid."),
+            ],
+            "SHADER": [
+                ("line", "Shader nodes (BSDF / Output):"),
+                ("line", "Sphere / Plane:  lit material ball, or a flat swatch."),
+                ("line", "World Light:  even environment brightness on the ball."),
+                ("line", "Key Light:  sun strength (Sphere only)."),
+                ("line", "Texture / color nodes always show a flat swatch."),
+            ],
+            "EDITORS": [
+                ("line", "Turn these on to preview the other editors:"),
+                ("line", "World:  environment swatch; a volume node (fog) is"),
+                ("line", "        shown on a lit sphere instead."),
+                ("line", "Geometry Nodes:  a small shaded (clay) 3D render"),
+                ("line", "        of the geometry."),
+                ("line", "        Texture / Math Nodes (checkbox): also show a"),
+                ("line", "        flat swatch for texture / math / colour nodes."),
+                ("line", "Compositor:  each node's image. Renders the scene per"),
+                ("line", "        node, so it is heavier. Updates on node edits;"),
+                ("line", "        press Refresh after changing the 3D scene."),
+                ("line", "        Inside Node Groups (checkbox): see Groups."),
+            ],
+            "GROUPS": [
+                ("line", "Group nodes get a thumbnail of their own output."),
+                ("line", "Inside a group (Tab):  its nodes are previewed with"),
+                ("line", "        the values the outer group node passes in."),
+                ("line", "A group used in several places follows the group"),
+                ("line", "        node you entered it from."),
+                ("line", "Compositor:  previews inside groups can be switched"),
+                ("line", "        off with Inside Node Groups (under Compositor);"),
+                ("line", "        each node renders the scene once."),
+            ],
+            "CACHE": [
+                ("line", "Cached: n / max  (panel bottom):  thumbnails kept"),
+                ("line", "        in GPU memory."),
+                ("line", "Max Cached Thumbnails:  set it in Edit > Preferences"),
+                ("line", "        > Add-ons > Node Preview Thumbnails. Above it,"),
+                ("line", "        the least recently shown are released; the"),
+                ("line", "        editor you are looking at keeps its own."),
+                ("line", "Per 100 thumbnails:  ~3 MB (64px), ~13 MB (128px),"),
+                ("line", "        ~50 MB (256px)."),
+                ("line", "Thumbnails of deleted nodes are released automatically."),
+                ("line", "Trash button:  clear all cached thumbnails now."),
+            ],
+        },
     },
     "ZH": {
         "show_previews": "顯示預覽",
@@ -1786,44 +1853,85 @@ TR = {
         "rendering_fmt": "算圖中… 剩 %d",
         "cached_fmt": "快取：%d / %d",
         "ctx_show": "顯示節點預覽",
+        "comp_groups": "群組內節點",
+        "pref_limit_fmt": "達上限時約：%d MB（低）/ %d MB（中）/ %d MB（高）",
         "help_tip": "說明各選項與按鈕的作用",
-        "help": [
-            ("title", "節點預覽 — 各控制項的作用"),
-            ("sec", "一般"),
-            ("line", "顯示預覽：所有縮圖的總開關。"),
-            ("line", "自動更新：節點輸入改變時自動重算。"),
-            ("line", "畫質：縮圖解析度（64 / 128 / 256 px）。"),
-            ("line", "每次算幾個：每次更新算幾張。越高越快，"),
-            ("line", "        但算圖時較卡。"),
-            ("line", "引擎：跟隨場景的算圖引擎（EEVEE / Cycles）。"),
-            ("sec", "過濾（節省資源）"),
-            ("line", "只有貼圖 / 著色器節點：略過純 Value / Math 節點。"),
-            ("line", "預覽範圍："),
-            ("line", "        All：預覽所有符合的節點。"),
-            ("line", "        Selected：只預覽你選取的節點。"),
-            ("line", "        Marked：只預覽你開啟的節點（右鍵 > 顯示"),
-            ("line", "        節點預覽，或用 勾選所選 / 取消所選）。"),
-            ("sec", "多輸出節點（如 Texture Coordinate）"),
-            ("line", "預覽插槽：節點要預覽哪個輸出（自動 = 第一個連線）。"),
-            ("line", "        也可在右鍵選單設定。"),
-            ("line", "並排顯示所有連線輸出：有連線的輸出以 2 欄格狀並排"),
-            ("line", "        （每個各算一張圖）。"),
-            ("sec", "著色器節點（BSDF / 輸出）"),
-            ("line", "球體 / 平面：打光材質球，或平面色板。"),
-            ("line", "世界光：材質球的均勻環境亮度。"),
-            ("line", "主光：塑形的主光強度（僅球體）。"),
-            ("line", "貼圖 / 顏色節點一律顯示平面色板。"),
-            ("sec", "其他編輯器（開啟以預覽）"),
-            ("line", "世界：環境色板；體積節點（霧）改用打光球顯示。"),
-            ("line", "幾何節點：幾何輸出用小張 3D 算圖。"),
-            ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
-            ("line", "        數學 / 顏色節點顯示為平面色板。"),
-            ("line", "合成器：各節點的影像結果。每個節點會算一次"),
-            ("line", "        場景，較重。"),
-            ("sec", "按鈕"),
-            ("line", "刷新：重算目前編輯器中所有節點。"),
-            ("line", "垃圾桶：清除所有快取縮圖。"),
+        "help_title": "節點預覽 — 各控制項的作用",
+        "help_tabs": [
+            ("GENERAL", "一般"), ("FILTER", "過濾"), ("OUTPUTS", "多輸出"),
+            ("SHADER", "著色器"), ("EDITORS", "其他編輯器"),
+            ("GROUPS", "節點群組"), ("CACHE", "快取"),
         ],
+        "help": {
+            "GENERAL": [
+                ("line", "顯示預覽：所有縮圖的總開關。"),
+                ("line", "自動更新：節點輸入改變時自動重算；在圖片上"),
+                ("line", "        用 Texture Paint 繪製、或修改節點群組內容"),
+                ("line", "        後也會更新。"),
+                ("line", "畫質：縮圖解析度（64 / 128 / 256 px）。"),
+                ("line", "每次算幾個：每次更新算幾張。越高越快，"),
+                ("line", "        但算圖時較卡。"),
+                ("line", "引擎：跟隨場景的算圖引擎（EEVEE / Cycles）。"),
+                ("sec", "按鈕"),
+                ("line", "刷新：重算目前編輯器中所有節點。"),
+                ("line", "垃圾桶：清除所有快取縮圖。"),
+            ],
+            "FILTER": [
+                ("line", "只有貼圖 / 著色器節點：略過純 Value / Math 節點。"),
+                ("line", "預覽範圍："),
+                ("line", "        All：預覽所有符合的節點。"),
+                ("line", "        Selected：只預覽你選取的節點。"),
+                ("line", "        Marked：只預覽你開啟的節點（右鍵 > 顯示"),
+                ("line", "        節點預覽，或用 勾選所選 / 取消所選）。"),
+            ],
+            "OUTPUTS": [
+                ("line", "適用有多個輸出的節點（如 Texture Coordinate）："),
+                ("line", "預覽插槽：節點要預覽哪個輸出（自動 = 第一個連線）。"),
+                ("line", "        也可在右鍵選單設定。"),
+                ("line", "並排顯示所有連線輸出：有連線的輸出以 2 欄格狀並排"),
+                ("line", "        （每個各算一張圖）。"),
+            ],
+            "SHADER": [
+                ("line", "著色器節點（BSDF / 輸出）："),
+                ("line", "球體 / 平面：打光材質球，或平面色板。"),
+                ("line", "世界光：材質球的均勻環境亮度。"),
+                ("line", "主光：塑形的主光強度（僅球體）。"),
+                ("line", "貼圖 / 顏色節點一律顯示平面色板。"),
+            ],
+            "EDITORS": [
+                ("line", "開啟後即可預覽其他編輯器："),
+                ("line", "世界：環境色板；體積節點（霧）改用打光球顯示。"),
+                ("line", "幾何節點：幾何輸出以有明暗的灰色（clay）小張"),
+                ("line", "        3D 算圖顯示。"),
+                ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
+                ("line", "        數學 / 顏色節點顯示為平面色板。"),
+                ("line", "合成器：各節點的影像結果。每個節點會算一次"),
+                ("line", "        場景，較重。編輯節點時自動更新；3D 場景"),
+                ("line", "        變動後請按刷新。"),
+                ("line", "        群組內節點（勾選框）：見「節點群組」頁。"),
+            ],
+            "GROUPS": [
+                ("line", "群組節點本身也會顯示其輸出的縮圖。"),
+                ("line", "進入群組（Tab）後：群組內的節點會依外層群組"),
+                ("line", "        節點實際傳入的值來預覽。"),
+                ("line", "同一個群組用在多處時，依你進入時所用的那個"),
+                ("line", "        群組節點計算。"),
+                ("line", "合成器：群組內的預覽可用「合成器」底下的"),
+                ("line", "        「群組內節點」關閉；每個節點各算一次場景。"),
+            ],
+            "CACHE": [
+                ("line", "快取：n / max（面板底部）：目前保留在 GPU 記憶體"),
+                ("line", "        的縮圖數量。"),
+                ("line", "上限（Max Cached Thumbnails）：在 Edit >"),
+                ("line", "        Preferences > Add-ons > Node Preview"),
+                ("line", "        Thumbnails 設定。超過時釋放最久沒顯示的"),
+                ("line", "        縮圖；目前正在看的編輯器一定保留。"),
+                ("line", "每 100 張約：3 MB（64px）、13 MB（128px）、"),
+                ("line", "        50 MB（256px）。"),
+                ("line", "已刪除節點的縮圖會自動釋放。"),
+                ("line", "垃圾桶按鈕：立即清除所有快取縮圖。"),
+            ],
+        },
     },
 }
 
@@ -1903,6 +2011,11 @@ class NPVProps(bpy.types.PropertyGroup):
         description="Preview compositor nodes (each preview renders the scene "
                     "through the compositor)",
         default=False, update=_mark_dirty)
+    comp_groups: bpy.props.BoolProperty(
+        name="Inside Node Groups",
+        description="Also preview the nodes inside a compositor node group when "
+                    "you enter it (each node renders the scene once)",
+        default=True, update=_node_show_update)
     preview_world: bpy.props.BoolProperty(
         name="World",
         description="Preview world / environment shader nodes",
@@ -1991,25 +2104,33 @@ class NPV_OT_help(bpy.types.Operator):
     bl_description = "Explain what each option and button does"
     bl_options = {"REGISTER"}
 
+    # One page at a time: the whole help no longer fits a popup's height, and
+    # popups do not scroll. The last page shown is remembered (operator prop).
+    page: bpy.props.EnumProperty(
+        name="Page",
+        items=[(pid, label, "") for pid, label in TR["EN"]["help_tabs"]],
+        default="GENERAL")
+
     def execute(self, context):
         return {"FINISHED"}
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_popup(self, width=460)
+        return context.window_manager.invoke_popup(self, width=520)
 
     def draw(self, context):
         layout = self.layout
         props = context.scene.npv
         row = layout.row(align=True)
         row.prop(props, "language", expand=True)
-        for kind, text in _t(props, "help"):
-            if kind == "title":
-                layout.label(text=text, icon="INFO")
-            elif kind == "sec":
+        layout.label(text=_t(props, "help_title"), icon="INFO")
+        row = layout.row(align=True)
+        for pid, label in _t(props, "help_tabs"):
+            row.prop_enum(self, "page", pid, text=label)
+        layout.separator()
+        for kind, text in _t(props, "help").get(self.page, ()):
+            if kind == "sec":
                 layout.separator()
-                layout.label(text=text)
-            else:
-                layout.label(text=text)
+            layout.label(text=text)
 
 
 class NPV_PT_panel(bpy.types.Panel):
@@ -2085,6 +2206,10 @@ class NPV_PT_panel(bpy.types.Panel):
         sub.separator(factor=2.0)
         sub.prop(props, "geo_fields", text=t("geo_fields"))
         box.prop(props, "preview_compositor", text=t("compositor"))
+        sub = box.row()
+        sub.enabled = props.preview_compositor
+        sub.separator(factor=2.0)
+        sub.prop(props, "comp_groups", text=t("comp_groups"))
         if kind == KIND_COMP and props.preview_compositor:
             box.label(text=t("comp_note1"), icon="INFO")
             box.label(text=t("comp_note2"), icon="BLANK1")
@@ -2125,7 +2250,9 @@ class NPVAddonPrefs(bpy.types.AddonPreferences):
         col = self.layout.column()
         col.prop(self, "max_textures")
         mb = {"64": 0.03125, "128": 0.125, "256": 0.5}
-        col.label(text="At the limit: ~%d MB (Low) / ~%d MB (Medium) / ~%d MB (High)" % tuple(
+        npv = getattr(context.scene, "npv", None)
+        fmt = _t(npv, "pref_limit_fmt") if npv is not None else TR["EN"]["pref_limit_fmt"]
+        col.label(text=fmt % tuple(
             max(1, round(self.max_textures * mb[r])) for r in ("64", "128", "256")),
             icon="INFO")
 

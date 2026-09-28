@@ -13,27 +13,36 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   (sphere) or a flat lit plane, with adjustable World Light / Key Light.
 - **World** — environment swatches; a **volume** node (fog) is shown on a lit
   sphere instead (a global world volume renders black as a plain 360°).
-- **Geometry Nodes** — a small **3D render of the geometry** at each node
-  (field-only sockets are skipped).
+- **Geometry Nodes** — a small shaded (clay) **3D render of the geometry** at
+  each node; texture / math / colour nodes can show a flat swatch.
 - **Compositor** — each node's **image result** (renders the scene through the
   compositor per node). Previews render on a temporary copy of the scene, so
   your Viewer node and Render Result keep their full resolution.
+- **Node groups** — group nodes get a thumbnail of their output, and after you
+  Tab into a group its nodes are previewed with the values the outer group
+  node actually passes in (Shader, World, Geometry Nodes and Compositor; the
+  compositor part can be switched off with *Inside Node Groups*).
 - **Engine** follows the scene's Render Engine (EEVEE / Cycles).
-- **Auto update** (only re-renders nodes whose inputs changed) + manual Refresh.
+- **Auto update** (only re-renders nodes whose inputs changed, including after
+  texture painting an image or editing inside a node group) + manual Refresh.
 - **Preview Scope** (All / Selected / Marked) to control which nodes preview —
   Selected follows your node selection; Marked uses per-node toggles (right-click
   menu or Mark / Unmark buttons).
 - **Per-socket preview** for multi-output nodes (e.g. Texture Coordinate) — pick
   which output to preview, or show all linked outputs side by side in a 2-column
   grid.
-- **Help popup** and an **Auto / English / 中文** UI toggle — Auto follows
-  Blender's own language setting (non-Chinese falls back to English).
+- **Thumbnail cache limit** — *Max Cached Thumbnails* in the add-on's
+  Preferences (least recently shown are released; the editor you are looking
+  at keeps its own); the panel shows `Cached: n / max`.
+- **Help popup** (one page per topic) and an **Auto / English / 中文** UI
+  toggle — Auto follows Blender's own language setting (non-Chinese falls
+  back to English).
 
 ## Install
 
 ### As a Blender Extension (Blender 5.2+)
 `Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.2.0.zip`.
+`dist/node_preview-1.3.0.zip`.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -51,7 +60,7 @@ extension/
   __init__.py                     Extension entry — generated from the .py above
                                   with the bl_info block removed
 dist/
-  node_preview-1.2.0.zip   Packaged extension (manifest + __init__.py)
+  node_preview-1.3.0.zip          Packaged extension (manifest + __init__.py)
 build_extension.py                Rebuilds the extension zip from the source .py
                                   (gated on the tests below)
 run_tests.py                      Runs tests/ in headless Blender
@@ -92,14 +101,11 @@ Checks that need the real node-editor UI are listed in
 
 ## Publishing to extensions.blender.org
 
-Before submitting, edit `extension/blender_manifest.toml`:
-- Replace the placeholder `website` with a real URL (or remove the line).
-- `id` must be unique on the platform.
-
-Validate locally with:
+Upload the zip that `python build_extension.py` wrote to `dist/` (the build
+already ran `extension validate` on it). To re-check a zip by hand:
 
 ```
-blender --command extension validate dist/node_preview-1.2.0.zip
+blender --command extension validate dist/node_preview-1.3.0.zip
 ```
 
 ## License
