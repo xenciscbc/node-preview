@@ -110,6 +110,9 @@ _state = {
     "visible": set(),     # keys of nodes on screen (rendered first)
     "priority": set(),    # keys of the active / selected nodes (rendered first)
     "src_hint": [],       # (kind, name) of the data-blocks the editor shows
+    "data_sigs": {},      # object data ref -> content fingerprint (_data_sig)
+    "data_gen": {},       # object data ref -> update count (cache invalidation
+                          # only; never part of a hash, see _data_sig)
     # Every node editor showing previews, by space pointer: its tree, kind,
     # path, source hint, selection signature and on-screen / priority keys.
     # One global "active editor" made two open editors overwrite each other.
@@ -124,9 +127,25 @@ def _key(tree, node_name):
     return "%d:%s" % (tree.as_pointer(), node_name)
 
 
-def _skey(tree, node_name, out_id):
-    """Cache key including the previewed output socket ('' for socketless)."""
-    return "%d:%s|%s" % (tree.as_pointer(), node_name, out_id or "")
+def _skey(tree, node_name, out_id, ctx=""):
+    """Cache key: tree, node, previewed output socket ('' for socketless) and
+    the view context (see _view_ctx) after '#'. The context keeps apart the
+    thumbnails of one tree seen through different sources -- a GN tree on two
+    objects, a group entered from two materials -- so two editors showing
+    them don't overwrite each other's thumbnails."""
+    key = "%d:%s|%s" % (tree.as_pointer(), node_name, out_id or "")
+    return key + "#" + ctx if ctx else key
+
+
+def _view_ctx(src, chain):
+    """Short id of the source data-block and the group-node chain a tree is
+    previewed through."""
+    return hashlib.md5(repr((src, list(chain or ()))).encode(
+        "utf-8", "replace")).hexdigest()[:10]
+
+
+def _key_ctx(key):
+    return key.rsplit("#", 1)[1] if "#" in key else ""
 
 
 def _engine_id(props=None):
@@ -1787,53 +1806,157 @@ def _geo_source_sig(obj_ref, root):
     if idx is None:
         return ""
     parts = [_modifier_sig(m) for m in list(obj.modifiers)[:idx + 1]]
-    parts.append(_data_sig(obj.data))
+    # Vertex groups: the names live on the object (a node reads a group by
+    # name), so they are read here, not cached with the mesh.
+    parts.append(tuple(g.name for g in obj.vertex_groups))
+    parts.append(_data_sig(obj.data, obj))
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
 
 
-def _coords_digest(coll, attr, width):
-    """md5 of one float attribute of every item of an RNA collection."""
+def _coords_digest(coll, attr, width, dtype=np.float32):
+    """md5 of one attribute of every item of an RNA collection."""
     n = len(coll)
-    arr = np.empty(n * width, dtype=np.float32)
+    arr = np.empty(n * width, dtype=dtype)
     if n:
         coll.foreach_get(attr, arr)
     return hashlib.md5(arr.tobytes()).hexdigest()
 
 
-def _data_sig(data):
-    """Fingerprint of an object's own data *content*: positions, element
-    counts and attribute layout. Content, not update events: a preview render
-    shares the user's mesh and makes Blender report it as updated, so
-    counting events re-rendered every Geometry Nodes preview after each
-    render, forever. In Edit Mode the mesh keeps its pre-edit data until you
-    leave it, which is also what the previews render."""
-    if data is None:
+# Attribute data type -> (field read by foreach_get, width, numpy dtype).
+_ATTR_FIELDS = {
+    "FLOAT": ("value", 1, np.float32), "INT": ("value", 1, np.int32),
+    "INT8": ("value", 1, np.int32), "BOOLEAN": ("value", 1, np.bool_),
+    "FLOAT_VECTOR": ("vector", 3, np.float32), "FLOAT2": ("vector", 2, np.float32),
+    "INT32_2D": ("value", 2, np.int32), "INT16_2D": ("value", 2, np.int32),
+    "FLOAT_COLOR": ("color", 4, np.float32), "BYTE_COLOR": ("color", 4, np.float32),
+    "QUATERNION": ("value", 4, np.float32), "FLOAT4X4": ("value", 16, np.float32),
+}
+VGROUP_WEIGHT_LIMIT = 100000   # vertices; above it weights aren't hashed
+
+
+def _attrs_sig(attrs):
+    """Every user attribute's name, domain, type and values (positions, UVs,
+    colours, custom attributes ...). Internal '.'-prefixed ones (selection,
+    hiding) don't change what a preview shows and are skipped."""
+    out = []
+    for a in attrs:
+        if a.name.startswith("."):
+            continue
+        f = _ATTR_FIELDS.get(a.data_type)
+        try:
+            dig = _coords_digest(a.data, f[0], f[1], f[2]) if f else len(a.data)
+        except Exception:
+            dig = len(a.data)
+        out.append((a.name, a.domain, a.data_type, dig))
+    return tuple(out)
+
+
+def _vgroups_sig(data, obj):
+    """Vertex-group weights (weight paint). They live in the mesh but are not
+    attributes, so this is a Python loop: skipped above VGROUP_WEIGHT_LIMIT
+    vertices, and deferred while weight painting (see _data_sig). The group
+    names are on the object (_geo_source_sig). Only read when the object has
+    vertex groups: vertex.groups is not touched otherwise."""
+    if obj is None or not len(getattr(obj, "vertex_groups", ())):
         return None
-    parts = [data.name]
+    verts = getattr(data, "vertices", None)
+    if verts is None:
+        return None
+    if len(verts) > VGROUP_WEIGHT_LIMIT:
+        return "unhashed"
+    h = hashlib.md5()
+    for v in verts:
+        for g in v.groups:
+            h.update(b"%d:%d:%.5f;" % (v.index, g.group, g.weight))
+    return h.hexdigest()
+
+
+def _splines_sig(data):
+    out = []
+    for sp in data.splines:
+        out.append((_simple_props_sig(sp),
+                    _coords_digest(sp.bezier_points, "co", 3),
+                    _coords_digest(sp.bezier_points, "handle_left", 3),
+                    _coords_digest(sp.bezier_points, "handle_right", 3),
+                    _coords_digest(sp.bezier_points, "radius", 1),
+                    _coords_digest(sp.bezier_points, "tilt", 1),
+                    _coords_digest(sp.points, "co", 4),
+                    _coords_digest(sp.points, "radius", 1),
+                    _coords_digest(sp.points, "tilt", 1)))
+    return tuple(out)
+
+
+def _gpencil_sig(data):
+    """Grease Pencil (v3): every layer's settings and every drawing's
+    attributes (stroke points live there)."""
+    out = []
+    for layer in data.layers:
+        frames = []
+        for fr in getattr(layer, "frames", ()):
+            dr = getattr(fr, "drawing", None)
+            attrs = getattr(dr, "attributes", None)
+            frames.append((fr.frame_number,
+                           _attrs_sig(attrs) if attrs is not None else None))
+        out.append((layer.name, _simple_props_sig(layer), tuple(frames)))
+    return tuple(out)
+
+
+def _compute_data_sig(data, obj=None):
+    parts = [_idref(data), _simple_props_sig(data)]   # bevel, text size, ...
     try:
         attrs = getattr(data, "attributes", None)
         if attrs is not None:
-            pos = attrs.get("position")
-            if pos is not None:
-                parts.append(_coords_digest(pos.data, "vector", 3))
-            parts.append(tuple(sorted((a.name, a.domain, a.data_type) for a in attrs)))
+            parts.append(_attrs_sig(attrs))
             for dom in ("vertices", "edges", "polygons", "loops", "points", "curves"):
                 c = getattr(data, dom, None)
                 if c is not None:
                     parts.append((dom, len(c)))
+            parts.append(_vgroups_sig(data, obj))
         elif hasattr(data, "splines"):                  # Curve / Text
-            for sp in data.splines:
-                parts.append((sp.type, sp.use_cyclic_u,
-                              _coords_digest(sp.bezier_points, "co", 3),
-                              _coords_digest(sp.bezier_points, "handle_left", 3),
-                              _coords_digest(sp.bezier_points, "handle_right", 3),
-                              _coords_digest(sp.points, "co", 4)))
+            parts.append(_splines_sig(data))
             parts.append(getattr(data, "body", None))
         elif hasattr(data, "points") and hasattr(data, "points_u"):   # Lattice
             parts.append(_coords_digest(data.points, "co_deform", 3))
+        if hasattr(data, "layers") and not hasattr(data, "splines"):  # GP v3
+            parts.append(_gpencil_sig(data))
     except Exception as exc:
         parts.append(repr(exc))
     return tuple(parts)
+
+
+def _data_sig(data, obj=None):
+    """Fingerprint of an object's own data *content* (positions, attribute
+    values, vertex-group weights, the data's settings; curve points, radius
+    and tilt; Grease Pencil drawings), part of its Geometry Nodes previews'
+    hash. Content, not update events: a preview render shares the user's
+    mesh and makes Blender report it as updated, so counting events
+    re-rendered every GN preview after each render, forever. Computed again
+    only after an update event for that data (_on_depsgraph). In Edit Mode
+    the mesh keeps its pre-edit data until you leave it, which is also what
+    the previews render."""
+    if data is None:
+        return None
+    ref = _idref(data)
+    # Keyed by whether weights are included: a mesh shared by an object with
+    # vertex groups and one without has two fingerprints, each noticing a
+    # change on its own (the update count is per data-block).
+    ck = (ref, bool(obj is not None and len(getattr(obj, "vertex_groups", ()))))
+    gen = _state["data_gen"].get(ref, 0)
+    hit = _state["data_sigs"].get(ck)
+    if hit is not None and obj is not None and obj.mode == "WEIGHT_PAINT":
+        # Every brush dab updates the mesh; hashing the weights each time
+        # would stall painting. The count stays ahead: leaving the mode
+        # updates the object and the next rebuild fingerprints once.
+        return hit[1]
+    if hit is None or hit[0] != gen:
+        hit = (gen, _compute_data_sig(data, obj))
+        _state["data_sigs"][ck] = hit
+    return hit[1]
+
+
+def _mark_data_changed(ref):
+    """Invalidate the cached fingerprints of one object data-block."""
+    _state["data_gen"][ref] = _state["data_gen"].get(ref, 0) + 1
 
 
 def rebuild_queue(tree, kind, props, force=False, path=None):
@@ -1862,6 +1985,7 @@ def _rebuild_queue(tree, kind, props, force, path):
     src = resolve_source(root, kind)
     if src is None:
         return
+    ctx = _view_ctx(src, chain)
     # Resolution is part of the signature so a Quality change re-renders;
     # the source too (a GN tree shared by several objects previews the one
     # the editor shows).
@@ -1889,24 +2013,38 @@ def _rebuild_queue(tree, kind, props, force, path):
             extra = esig
         h = hashlib.md5((h + extra).encode("utf-8", "replace")).hexdigest()
         for out_id in _preview_targets(node, kind, props):
-            key = _skey(tree, node.name, out_id)
+            key = _skey(tree, node.name, out_id, ctx)
             live.add(key)
             _enqueue(kind, src, tree, node.name, out_id, key, h, force,
                      root, chain)
     # Thumbnails of this tree that are no longer shown (node deleted or
     # renamed, output switched, filtered out) only hold GPU memory.
+    # Only this view's (same context): another editor may show the same tree
+    # through another source, and its thumbnails are still in use. Those of
+    # a context nobody shows any more age out of the cache (_prune_cache).
     prefix = "%d:" % tree.as_pointer()
-    for key in [k for k in set(_state["textures"]) | set(_state["failed"])
-                if k.startswith(prefix) and k not in live]:
+
+    def stale(k):
+        return k.startswith(prefix) and k not in live and _key_ctx(k) in ("", ctx)
+
+    for key in [k for k in set(_state["textures"]) | set(_state["failed"]) if stale(k)]:
         _drop_texture(key)
     # Their pending renders too (e.g. Scope switched to Selected while a
-    # compositor tree was queued: each one would render the whole scene).
+    # compositor tree was queued: each one would render the whole scene), and
+    # those of another context no open editor shows (the source switched
+    # before they rendered).
+    shown = {e.get("ctx") for e in _state["editors"].values()
+             if e.get("tree") == tree.as_pointer()}
+
+    def unwanted(k):
+        return stale(k) or (k.startswith(prefix) and k not in live
+                            and _key_ctx(k) not in shown)
+
     q = _state["queue"]
-    stale = [it for it in q if it["key"].startswith(prefix) and it["key"] not in live]
-    if stale:
-        q[:] = [it for it in q if not (it["key"].startswith(prefix)
-                                        and it["key"] not in live)]
-        _state["queued_keys"].difference_update(it["key"] for it in stale)
+    gone = [it for it in q if unwanted(it["key"])]
+    if gone:
+        q[:] = [it for it in q if not unwanted(it["key"])]
+        _state["queued_keys"].difference_update(it["key"] for it in gone)
 
 
 def _touch(key):
@@ -1924,7 +2062,7 @@ def _drop_texture(key):
 
 def _reset_cache():
     """Forget every thumbnail, pending render and failure."""
-    for k in ("textures", "tex_tick", "img_gen", "hashes", "failed",
+    for k in ("textures", "tex_tick", "img_gen", "data_sigs", "data_gen", "hashes", "failed",
               "values"):
         _state[k].clear()
     _state["queue"].clear()
@@ -1974,10 +2112,8 @@ def _prune_cache():
         # Never evict the editor's own thumbnails: they'd go blank, re-render
         # on the next edit and get evicted again. If they alone exceed the
         # limit, the cache stays above it until the user moves on.
-        keep = tuple("%d:" % p for p in _shown_tree_ptrs())
         tick = _state["tex_tick"]
-        victims = sorted((k for k in _state["textures"]
-                          if not (keep and k.startswith(keep))),
+        victims = sorted((k for k in _state["textures"] if not _in_view(k)),
                          key=lambda k: tick.get(k, 0))
         for key in victims[:extra]:
             _drop_texture(key)
@@ -2128,28 +2264,34 @@ def _prune_editors():
         del eds[k]
 
 
-def _shown_tree_ptrs():
-    ptrs = {e["tree"] for e in _state["editors"].values()}
-    if _state["active_tree_ptr"]:
-        ptrs.add(_state["active_tree_ptr"])
-    return ptrs
+def _in_view(key):
+    """Is this thumbnail one an open editor is showing right now (its tree
+    in the context that editor shows)? Those are never evicted. Thumbnails of
+    the same tree for another source (another object sharing a GN tree ...)
+    age out like any other. With no editor recorded, the last drawn tree's."""
+    try:
+        ptr = int(key.split(":", 1)[0])
+    except ValueError:
+        return False
+    eds = _state["editors"]
+    if not eds:
+        return ptr == _state["active_tree_ptr"]
+    kc = _key_ctx(key)
+    return any(e.get("tree") == ptr and e.get("ctx", kc) in (kc, "")
+               for e in eds.values())
 
 
 def _editor_targets():
-    """(tree, kind, path, source hint) for every editor showing previews,
-    pinned editors first so an unpinned editor on the same shared tree has
-    the last word (they share its thumbnails). With no editor recorded
-    (e.g. background mode) the last drawn one, as before."""
+    """(tree, kind, path, source hint) for every editor showing previews.
+    With no editor recorded (e.g. background mode) the last drawn one."""
     _prune_editors()
     eds = list(_state["editors"].values())
-    # An unpinned editor wins a tree it shares with a pinned one: they share
-    # its thumbnails, so rebuilding for both would only re-queue twice.
-    unpinned = {e["tree"] for e in eds if not e["pinned"]}
+    # Editors on the same tree through different sources (pinned to another
+    # object, a group entered from another material) each get their own
+    # thumbnails: the source is part of the cache key (_view_ctx).
     out, seen = [], set()
     for e in eds:
-        if e["pinned"] and e["tree"] in unpinned:
-            continue
-        sig = (e["kind"], tuple(e["path"]))
+        sig = (e["kind"], tuple(e["path"]), repr(e["hint"]))
         if sig in seen:
             continue
         path = [_tree_by_pointer(p) for p in e["path"]]
@@ -2222,6 +2364,23 @@ _DATA_ID_TYPES = {"MESH", "CURVE", "CURVES", "POINTCLOUD", "VOLUME", "LATTICE",
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
         return
+    # Which object data changed is recorded even while previews are off or
+    # Auto Update is off: the fingerprints are cached (_data_sig), and an
+    # edit made meanwhile must not be missed once previews come back.
+    for upd in depsgraph.updates:
+        idt = getattr(upd.id, "id_type", "")
+        try:
+            if idt in _DATA_ID_TYPES:
+                _mark_data_changed(_idref(getattr(upd.id, "original", upd.id)))
+            elif idt == "OBJECT" and upd.is_updated_geometry:
+                # Sculpting, or a script's foreach_set + update_tag(), may tag
+                # only the object: its data may have changed too.
+                data = getattr(getattr(upd.id, "original", upd.id), "data", None)
+                if data is not None:
+                    _mark_data_changed(_idref(data))
+        except Exception:
+            if idt in _DATA_ID_TYPES:
+                _mark_data_changed(getattr(upd.id, "name", ""))
     props = getattr(scene, "npv", None)
     if props is None or not props.enabled or not props.auto_update:
         return
@@ -2234,8 +2393,8 @@ def _on_depsgraph(scene, depsgraph):
             _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
             _state["dirty"] = True
         elif idt in _DATA_ID_TYPES:
-            # An object's own data may have changed: re-hash (its content is
-            # part of its Geometry Nodes previews' hash, see _data_sig).
+            # An object's own data may have changed (recorded above): re-hash;
+            # its content is part of its GN previews' hash (_data_sig).
             _state["dirty"] = True
         elif idt == "OBJECT":
             # Moving / rotating an object changes nothing a preview shows
@@ -2444,14 +2603,16 @@ def _editor_hint(ctx, space):
         objs.append(getattr(ctx, "active_object", None))
     hint = []
     for d in objs:
+        # _idref: linked data keeps its library, so a linked material "Foo"
+        # doesn't resolve to a local "Foo" (or to nothing).
         if isinstance(d, bpy.types.Material):
-            hint.append(("MAT", d.name))
+            hint.append(("MAT", _idref(d)))
         elif isinstance(d, bpy.types.Light):
-            hint.append(("LIGHT", d.name))
+            hint.append(("LIGHT", _idref(d)))
         elif isinstance(d, bpy.types.Object):
-            hint.append(("OBJ", d.name))
+            hint.append(("OBJ", _idref(d)))
             if isinstance(d.data, bpy.types.Light):
-                hint.append(("LIGHT", d.data.name))
+                hint.append(("LIGHT", _idref(d.data)))
     return list(dict.fromkeys(hint))
 
 
@@ -2487,6 +2648,25 @@ def _record_editor(ctx, space, ptr, kind, path, props, tree):
     return ent
 
 
+def _editor_view_ctx(space, tree, kind, hint):
+    """The _view_ctx this editor's thumbnails are cached under -- the same
+    one rebuild_queue computes for its view (source through this editor's
+    hint, group-node chain through its path)."""
+    trees = [p.node_tree for p in getattr(space, "path", ()) if p.node_tree is not None]
+    if not trees or trees[-1] != tree:
+        trees = [tree]
+    chain = _instance_chain(trees)
+    if chain is None:
+        return ""
+    saved = _state["src_hint"]
+    _state["src_hint"] = hint
+    try:
+        src = resolve_source(trees[0], kind)
+    finally:
+        _state["src_hint"] = saved
+    return _view_ctx(src, chain) if src is not None else ""
+
+
 def draw_callback():
     ctx = bpy.context
     space = ctx.space_data
@@ -2513,6 +2693,8 @@ def draw_callback():
     # selection) re-queues once, so the editor auto-refreshes on switch.
     ent = _record_editor(ctx, space, ptr, kind, path, props, tree)
     _ensure_timer()
+    vctx = _editor_view_ctx(space, tree, kind, ent["hint"])
+    ent["ctx"] = vctx
 
     region = ctx.region
     v2d = region.view2d
@@ -2551,7 +2733,7 @@ def draw_callback():
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
             continue
-        keys = [(oid, _skey(tree, node.name, oid))
+        keys = [(oid, _skey(tree, node.name, oid, vctx))
                 for oid in _preview_targets(node, kind, props)]
         if node.select or node == active:
             priority.update(k for _o, k in keys)
@@ -3422,9 +3604,18 @@ class NPV_PT_panel(bpy.types.Panel):
         if _state["queue"]:
             body.label(text=t("rendering_fmt") % len(_state["queue"]),
                        icon="SORTTIME")
-        nfail = sum(1 for k in _state["failed"]
-                    if k.startswith("%d:" % context.space_data.edit_tree.as_pointer()))\
-            if getattr(context.space_data, "edit_tree", None) is not None else 0
+        nfail = 0
+        et = getattr(context.space_data, "edit_tree", None)
+        if et is not None:
+            # Only this editor's view: failures of the same tree through
+            # another source (another object ...) don't apply here.
+            try:
+                vc = _state["editors"].get(context.space_data.as_pointer(), {}).get("ctx")
+            except Exception:
+                vc = None
+            pre = "%d:" % et.as_pointer()
+            nfail = sum(1 for k in _state["failed"] if k.startswith(pre)
+                        and (vc is None or _key_ctx(k) in (vc, "")))
         if nfail:
             body.label(text=t("failed_fmt") % nfail, icon="ERROR")
         body.label(text=t("cached_fmt") % (len(_state["textures"]), _max_textures()),

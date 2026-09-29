@@ -198,6 +198,7 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         assert mod._state["queue"], "object data edit not detected"
         _mark_rendered(mod)
         ob.data.vertices[-1].co = (0.5, 0.75, 0.0)
+        mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "moving a vertex not detected"
     finally:

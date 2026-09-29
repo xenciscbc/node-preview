@@ -822,14 +822,16 @@ def test_pinned_editor_keeps_its_own_hint(mod):
             mod._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
             mod._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
         assert not mod._state["dirty"], "two editors keep re-queueing each other"
-        # Sharing one tree, the unpinned editor has the last word.
+        # Sharing one tree, both are rebuilt, each through its own object:
+        # the source is part of the cache key, so they don't collide.
         orig = mod._live_space_ptrs
         mod._live_space_ptrs = lambda: None
         try:
             targets = mod._editor_targets()
         finally:
             mod._live_space_ptrs = orig
-        assert [t[3] for t in targets] == [[("OBJ", b.name)]], targets
+        assert sorted(repr(t[3]) for t in targets) == sorted(
+            [repr([("OBJ", a.name)]), repr([("OBJ", b.name)])]), targets
     finally:
         mod._state["editors"].clear()
         _clear(mod)
