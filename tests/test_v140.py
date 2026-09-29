@@ -795,25 +795,43 @@ def test_queued_item_follows_a_source_switch(mod):
         bpy.data.node_groups.remove(ng)
 
 
-def test_pinned_editor_does_not_overwrite_the_hint(mod):
+def test_pinned_editor_keeps_its_own_hint(mod):
     ng, (a, b) = _shared_gn()
+    ptrs = iter(range(1000, 2000))
 
     def space(pin, obj):
-        return type("Space", (), {"pin": pin, "id": obj, "id_from": None})()
+        p = next(ptrs)
+        return type("Space", (), {"pin": pin, "id": obj, "id_from": None,
+                                  "as_pointer": lambda self: p})()
 
     ctx = type("Ctx", (), {"active_object": b})()
+    props = _props()
+    tp = ng.as_pointer()
+    unpinned, pinned = space(False, b), space(True, a)
     try:
         _clear(mod)
-        mod._record_hint(ctx, space(False, b))
+        mod._state["editors"].clear()
+        mod._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
+        mod._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
+        # The pinned editor ignores the active object and doesn't set the
+        # global hint; redrawing both in turn no longer marks anything dirty.
+        assert mod._state["editors"][1001]["hint"] == [("OBJ", a.name)]
         assert mod._state["src_hint"] == [("OBJ", b.name)]
         mod._state["dirty"] = False
-        # A pinned editor on A redrawing in between must not flip the hint.
         for _ in range(3):
-            mod._record_hint(ctx, space(True, a))
-            mod._record_hint(ctx, space(False, b))
-        assert mod._state["src_hint"] == [("OBJ", b.name)]
+            mod._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
+            mod._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
         assert not mod._state["dirty"], "two editors keep re-queueing each other"
+        # Sharing one tree, the unpinned editor has the last word.
+        orig = mod._live_space_ptrs
+        mod._live_space_ptrs = lambda: None
+        try:
+            targets = mod._editor_targets()
+        finally:
+            mod._live_space_ptrs = orig
+        assert [t[3] for t in targets] == [[("OBJ", b.name)]], targets
     finally:
+        mod._state["editors"].clear()
         _clear(mod)
         for ob in (a, b):
             me = ob.data

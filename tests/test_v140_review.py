@@ -113,8 +113,38 @@ def _gn_object():
     bpy.context.scene.collection.objects.link(ob)
     m = ob.modifiers.new("GN", "NODES")
     m.node_group = ng
-    m[amount.identifier] = 1.0
+    set_modifier_input(m, amount.identifier, "Amount", 1.0)
     return ob, ng, m, amount.identifier
+
+
+def set_modifier_input(m, ident, name, value):
+    """Set a Geometry Nodes modifier input on any version: an ID property up
+    to 5.1; from 5.2 (no ID properties on modifiers) an RNA item whose
+    identifier or name matches, via its value property."""
+    try:
+        m[ident] = value
+        return
+    except TypeError:
+        pass
+    # Blender 5.2+
+    inputs = getattr(getattr(m, "properties", None), "inputs", None)
+    item = getattr(inputs, ident, None)
+    if item is not None and hasattr(item, "value"):
+        item.value = value
+        return
+    for p in m.bl_rna.properties:
+        if p.type != "COLLECTION":
+            continue
+        for it in getattr(m, p.identifier):
+            keys = {getattr(it, a, None) for a in ("identifier", "name", "socket_identifier")}
+            if ident in keys or name in keys:
+                for vp in ("value", "default_value", "value_float", "float_value"):
+                    if vp in it.bl_rna.properties:
+                        setattr(it, vp, value)
+                        return
+    raise AssertionError(
+        "can't set modifier input %r on this Blender; modifier RNA: %s" % (
+            ident, [(p.identifier, p.type) for p in m.bl_rna.properties]))
 
 
 class _Upd:
@@ -147,15 +177,29 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
         assert not mod._state["queue"], "a modifier panel toggle re-rendered"
 
-        m[ident] = 2.0
+        set_modifier_input(m, ident, "Amount", 2.0)
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "modifier input change not detected"
         _mark_rendered(mod)
 
+        # An update event alone (what a preview render causes, since the
+        # preview shares the mesh) must not re-render: that looped forever.
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
         assert mod._state["dirty"]
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert not mod._state["queue"], "a data update with no change re-rendered"
+
+        # A real edit of the object's data does.
+        ob.data.vertices.add(1)
+        ob.data.vertices[-1].co = (0.5, 0.25, 0.0)
+        ob.data.update()
+        mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "object data edit not detected"
+        _mark_rendered(mod)
+        ob.data.vertices[-1].co = (0.5, 0.75, 0.0)
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert mod._state["queue"], "moving a vertex not detected"
     finally:
         props.preview_geometry = False
         _clear(mod)
@@ -414,3 +458,33 @@ def test_clear_cache_marks_previews_dirty(mod):
     bpy.ops.node.npv_clear()
     assert not mod._state["textures"]
     assert mod._state["dirty"], "Clear Cache left the editor blank"
+
+
+def test_geo_preview_render_does_not_requeue_itself(mod):
+    # Regression (5.2 GUI): the preview object shares the user's mesh, so
+    # rendering reported a MESH update that bumped a counter in the hash and
+    # re-rendered every GN preview after each render, forever.
+    ob, ng, m, ident = _gn_object()
+    props = _props()
+    props.preview_geometry = True
+    try:
+        _clear(mod)
+        mod._state["src_hint"] = [("OBJ", ob.name)]
+        mod.ensure_preview_scene(32)
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert mod._state["queue"]
+        with capture_renders(mod):
+            while mod._state["queue"]:
+                mod.process_queue(props)
+        # What Blender reports after the render, from both scenes.
+        for _ in range(2):
+            mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert not mod._state["queue"], "a preview render re-queued its own previews"
+    finally:
+        props.preview_geometry = False
+        _clear(mod)
+        me = ob.data
+        bpy.data.objects.remove(ob)
+        bpy.data.meshes.remove(me)
+        bpy.data.node_groups.remove(ng)

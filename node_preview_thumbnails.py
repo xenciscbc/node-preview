@@ -118,8 +118,11 @@ _state = {
     "visible": set(),     # keys of nodes on screen (rendered first)
     "priority": set(),    # keys of the active / selected nodes (rendered first)
     "src_hint": [],       # (kind, name) of the data-blocks the editor shows
+    # Every node editor showing previews, by space pointer: its tree, kind,
+    # path, source hint, selection signature and on-screen / priority keys.
+    # One global "active editor" made two open editors overwrite each other.
+    "editors": {},
     "export_to": None,    # file path: the next render is copied there instead
-    "data_gen": {},       # object data name -> update counter (mesh edits)
     "tree_sig_memo": None,  # tree pointer -> tree_signature, during a rebuild
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
@@ -1700,18 +1703,85 @@ _MOD_UI_PROPS = {"name", "is_active", "is_override_data", "use_pin_to_last",
                  "show_expanded", "show_in_editmode", "show_on_cage"}
 
 
+def _is_ui_prop(pid):
+    return (pid in _MOD_UI_PROPS or pid.startswith("open_") or pid == "is_open"
+            or pid == "panels"
+            or (pid.startswith("show_") and pid not in ("show_viewport", "show_render")))
+
+
+def _nested_sig(struct, depth=2):
+    """Plain settings of the non-ID structs and collection items hanging off
+    ``struct`` (``depth`` levels), minus UI state. Blender 5.2 no longer keeps
+    Geometry Nodes modifier inputs as ID properties; walking the RNA catches
+    them wherever the running version exposes them."""
+    out = []
+    for p in struct.bl_rna.properties:
+        pid = p.identifier
+        if pid in _STRUCT_SKIP or _is_ui_prop(pid) or p.type not in {"POINTER", "COLLECTION"}:
+            continue
+        try:
+            v = getattr(struct, pid)
+        except Exception:
+            continue
+        if p.type == "POINTER":
+            if v is None or isinstance(v, bpy.types.ID):
+                continue            # ID pointers: by name in _simple_props_sig
+            items = [v]
+        else:
+            try:
+                items = list(v)
+            except Exception:
+                continue
+            if len(items) > 512:
+                continue
+        sig = []
+        for it in items:
+            if it is None or isinstance(it, bpy.types.ID):
+                sig.append(_plain(it))
+                continue
+            flat = tuple(kv for kv in _simple_props_sig(it) if not _is_ui_prop(kv[0]))
+            sig.append((flat, _nested_sig(it, depth - 1) if depth > 1 else ()))
+        out.append((pid, tuple(sig)))
+    return tuple(out)
+
+
 def _modifier_sig(m):
-    """A modifier's settings and its ID-property inputs (a Geometry Nodes
-    modifier keeps its input values there), minus panel / UI state."""
-    vals = [(pid, v) for pid, v in _simple_props_sig(m)
-            if pid not in _MOD_UI_PROPS and not pid.startswith("open_")
-            and not (pid.startswith("show_")
-                     and pid not in ("show_viewport", "show_render"))]
+    """A modifier's settings and its inputs, minus panel / UI state. Up to
+    Blender 5.1 a Geometry Nodes modifier keeps its input values as ID
+    properties; from 5.2 they are RNA data (walked by _nested_sig)."""
+    vals = [(pid, v) for pid, v in _simple_props_sig(m) if not _is_ui_prop(pid)]
     try:
         idp = tuple(sorted((k, _plain(m[k])) for k in m.keys()))
-    except Exception:
+    except Exception:           # 5.2+: "id properties not supported"
         idp = ()
-    return (m.type, tuple(vals), idp)
+    try:
+        nested = _nested_sig(m)
+    except Exception:
+        nested = ()
+    return (m.type, tuple(vals), idp, nested, _gn_inputs_sig(m))
+
+
+def _gn_inputs_sig(m):
+    """Blender 5.2+: a Geometry Nodes modifier's input values live at
+    ``m.properties.inputs.<socket identifier>`` (value / attribute name /
+    input type), one struct per group input."""
+    inputs = getattr(getattr(m, "properties", None), "inputs", None)
+    ng = getattr(m, "node_group", None)
+    if inputs is None or ng is None:
+        return ()
+    out = []
+    for item in ng.interface.items_tree:
+        if getattr(item, "item_type", "") != "SOCKET" or item.in_out != "INPUT":
+            continue
+        v = getattr(inputs, item.identifier, None)
+        if v is None:
+            continue
+        try:
+            out.append((item.identifier, _simple_props_sig(v),
+                        _plain(getattr(v, "value", None))))
+        except Exception:
+            pass
+    return tuple(out)
 
 
 def _geo_source_sig(obj_ref, root):
@@ -1725,10 +1795,53 @@ def _geo_source_sig(obj_ref, root):
     if idx is None:
         return ""
     parts = [_modifier_sig(m) for m in list(obj.modifiers)[:idx + 1]]
-    data = obj.data
-    if data is not None:
-        parts.append((data.name, _state["data_gen"].get(data.name, 0)))
+    parts.append(_data_sig(obj.data))
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _coords_digest(coll, attr, width):
+    """md5 of one float attribute of every item of an RNA collection."""
+    n = len(coll)
+    arr = np.empty(n * width, dtype=np.float32)
+    if n:
+        coll.foreach_get(attr, arr)
+    return hashlib.md5(arr.tobytes()).hexdigest()
+
+
+def _data_sig(data):
+    """Fingerprint of an object's own data *content*: positions, element
+    counts and attribute layout. Content, not update events: a preview render
+    shares the user's mesh and makes Blender report it as updated, so
+    counting events re-rendered every Geometry Nodes preview after each
+    render, forever. In Edit Mode the mesh keeps its pre-edit data until you
+    leave it, which is also what the previews render."""
+    if data is None:
+        return None
+    parts = [data.name]
+    try:
+        attrs = getattr(data, "attributes", None)
+        if attrs is not None:
+            pos = attrs.get("position")
+            if pos is not None:
+                parts.append(_coords_digest(pos.data, "vector", 3))
+            parts.append(tuple(sorted((a.name, a.domain, a.data_type) for a in attrs)))
+            for dom in ("vertices", "edges", "polygons", "loops", "points", "curves"):
+                c = getattr(data, dom, None)
+                if c is not None:
+                    parts.append((dom, len(c)))
+        elif hasattr(data, "splines"):                  # Curve / Text
+            for sp in data.splines:
+                parts.append((sp.type, sp.use_cyclic_u,
+                              _coords_digest(sp.bezier_points, "co", 3),
+                              _coords_digest(sp.bezier_points, "handle_left", 3),
+                              _coords_digest(sp.bezier_points, "handle_right", 3),
+                              _coords_digest(sp.points, "co", 4)))
+            parts.append(getattr(data, "body", None))
+        elif hasattr(data, "points") and hasattr(data, "points_u"):   # Lattice
+            parts.append(_coords_digest(data.points, "co_deform", 3))
+    except Exception as exc:
+        parts.append(repr(exc))
+    return tuple(parts)
 
 
 def rebuild_queue(tree, kind, props, force=False, path=None):
@@ -1819,7 +1932,7 @@ def _drop_texture(key):
 
 def _reset_cache():
     """Forget every thumbnail, pending render and failure."""
-    for k in ("textures", "tex_tick", "img_gen", "data_gen", "hashes", "failed",
+    for k in ("textures", "tex_tick", "img_gen", "hashes", "failed",
               "values"):
         _state[k].clear()
     _state["queue"].clear()
@@ -1869,11 +1982,10 @@ def _prune_cache():
         # Never evict the editor's own thumbnails: they'd go blank, re-render
         # on the next edit and get evicted again. If they alone exceed the
         # limit, the cache stays above it until the user moves on.
-        active = _state["active_tree_ptr"]
-        keep = "%d:" % active if active else None
+        keep = tuple("%d:" % p for p in _shown_tree_ptrs())
         tick = _state["tex_tick"]
         victims = sorted((k for k in _state["textures"]
-                          if keep is None or not k.startswith(keep)),
+                          if not (keep and k.startswith(keep))),
                          key=lambda k: tick.get(k, 0))
         for key in victims[:extra]:
             _drop_texture(key)
@@ -1998,6 +2110,67 @@ def _tag_node_editors():
 # --------------------------------------------------------------------------- #
 #  Timer / depsgraph
 # --------------------------------------------------------------------------- #
+def _live_space_ptrs():
+    """Pointers of every node-editor space in every open window, or None
+    when there are no windows (background mode)."""
+    wm = bpy.context.window_manager
+    if wm is None or not wm.windows:
+        return None
+    ptrs = set()
+    for win in wm.windows:
+        for area in win.screen.areas:
+            if area.type == "NODE_EDITOR":
+                for sp in area.spaces:
+                    if sp.type == "NODE_EDITOR":
+                        ptrs.add(sp.as_pointer())
+    return ptrs
+
+
+def _prune_editors():
+    """Forget editors that were closed or switched to another editor type."""
+    live = _live_space_ptrs()
+    if live is None:
+        return
+    eds = _state["editors"]
+    for k in [k for k in eds if k not in live]:
+        del eds[k]
+
+
+def _shown_tree_ptrs():
+    ptrs = {e["tree"] for e in _state["editors"].values()}
+    if _state["active_tree_ptr"]:
+        ptrs.add(_state["active_tree_ptr"])
+    return ptrs
+
+
+def _editor_targets():
+    """(tree, kind, path, source hint) for every editor showing previews,
+    pinned editors first so an unpinned editor on the same shared tree has
+    the last word (they share its thumbnails). With no editor recorded
+    (e.g. background mode) the last drawn one, as before."""
+    _prune_editors()
+    eds = list(_state["editors"].values())
+    # An unpinned editor wins a tree it shares with a pinned one: they share
+    # its thumbnails, so rebuilding for both would only re-queue twice.
+    unpinned = {e["tree"] for e in eds if not e["pinned"]}
+    out, seen = [], set()
+    for e in eds:
+        if e["pinned"] and e["tree"] in unpinned:
+            continue
+        sig = (e["kind"], tuple(e["path"]))
+        if sig in seen:
+            continue
+        path = [_tree_by_pointer(p) for p in e["path"]]
+        if not path or any(t is None for t in path):
+            continue
+        seen.add(sig)
+        out.append((path[-1], e["kind"], path, e["hint"]))
+    if not out:
+        tree, kind, path = _resolve_active()
+        out.append((tree, kind, path, _state["src_hint"]))
+    return out
+
+
 def _animation_playing():
     try:
         return any(w.screen is not None and w.screen.is_animation_playing
@@ -2019,9 +2192,14 @@ def _timer():
     shown = len(_state["textures"])
     if _state["dirty"] and props.auto_update:
         _state["dirty"] = False
-        tree, kind, path = _resolve_active()
-        if tree is not None and _kind_enabled(kind, props):
-            rebuild_queue(tree, kind, props, force=False, path=path)
+        saved_hint = _state["src_hint"]
+        try:
+            for tree, kind, path, hint in _editor_targets():
+                if tree is not None and _kind_enabled(kind, props):
+                    _state["src_hint"] = hint
+                    rebuild_queue(tree, kind, props, force=False, path=path)
+        finally:
+            _state["src_hint"] = saved_hint
     _drop_disallowed(props)
     rendered = process_queue(props)
     _state["prune_in"] -= 1
@@ -2064,10 +2242,8 @@ def _on_depsgraph(scene, depsgraph):
             _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
             _state["dirty"] = True
         elif idt in _DATA_ID_TYPES:
-            # Editing an object's own data (edit-mode mesh edits, ...): the
-            # counter is part of its Geometry Nodes previews' hash.
-            name = upd.id.name
-            _state["data_gen"][name] = _state["data_gen"].get(name, 0) + 1
+            # An object's own data may have changed: re-hash (its content is
+            # part of its Geometry Nodes previews' hash, see _data_sig).
             _state["dirty"] = True
         elif idt == "OBJECT":
             # Moving / rotating an object changes nothing a preview shows
@@ -2102,6 +2278,7 @@ def _on_load_post(_filepath):
     _socket_enum_cache.clear()
     _state["sel_sig"] = None
     _state["src_hint"] = []
+    _state["editors"].clear()
     _state["active_tree_ptr"] = None
     _state["active_kind"] = None
     _state["active_path"] = None
@@ -2266,32 +2443,56 @@ def _grid_origin(pos, x0, x1, y0, node_h, gw, gh, gap):
     return x0 + (x1 - x0 - gw) / 2.0, y0 + gap        # ABOVE
 
 
-def _record_hint(ctx, space):
-    """Remember which material / light / object the editor shows so the
-    queue previews through it (see resolve_source).
-
-    A pinned editor is skipped: it shows its own data-block, and letting it
-    write the (single, global) hint would make it fight an unpinned editor on
-    the same shared tree -- each redraw would flip the source, change every
-    hash and re-render the tree forever. Unpinned editors all follow the
-    active object / material, so they agree."""
-    if getattr(space, "pin", False):
-        return
+def _editor_hint(ctx, space):
+    """Which material / light / object the editor shows (its id / id_from
+    and, unless it is pinned, the active object), so the queue previews
+    through it (see resolve_source)."""
+    objs = [getattr(space, "id", None), getattr(space, "id_from", None)]
+    if not getattr(space, "pin", False):
+        objs.append(getattr(ctx, "active_object", None))
     hint = []
-    for d in (getattr(space, "id", None), getattr(space, "id_from", None),
-              getattr(ctx, "active_object", None)):
+    for d in objs:
         if isinstance(d, bpy.types.Material):
-            hint.append(("MAT", _idref(d)))
+            hint.append(("MAT", d.name))
         elif isinstance(d, bpy.types.Light):
-            hint.append(("LIGHT", _idref(d)))
+            hint.append(("LIGHT", d.name))
         elif isinstance(d, bpy.types.Object):
-            hint.append(("OBJ", _idref(d)))
+            hint.append(("OBJ", d.name))
             if isinstance(d.data, bpy.types.Light):
-                hint.append(("LIGHT", _idref(d.data)))
-    hint = list(dict.fromkeys(hint))
-    if hint != _state.get("src_hint"):
-        _state["src_hint"] = hint
+                hint.append(("LIGHT", d.data.name))
+    return list(dict.fromkeys(hint))
+
+
+def _record_editor(ctx, space, ptr, kind, path, props, tree):
+    """Store this editor's view; mark previews dirty only when *this*
+    editor's own view changed (so two editors redrawing in turn no longer
+    re-queue each other on every redraw)."""
+    try:
+        sptr = space.as_pointer()
+    except Exception:
+        sptr = id(space)
+    pinned = bool(getattr(space, "pin", False))
+    hint = _editor_hint(ctx, space)
+    sel = None
+    if getattr(props, "preview_scope", "ALL") == "SELECTED":
+        # A selection change has no depsgraph update: watch it here.
+        sel = tuple(sorted(n.name for n in tree.nodes if n.select))
+    eds = _state["editors"]
+    old = eds.get(sptr)
+    new_view = (ptr, kind, path, hint, pinned, sel)
+    if old is None or old["view"] != new_view:
         _state["dirty"] = True
+    ent = old or {"visible": set(), "priority": set()}
+    ent.update({"view": new_view, "tree": ptr, "kind": kind, "path": path,
+                "hint": hint, "pinned": pinned})
+    eds[sptr] = ent
+    # The last drawn editor, for code / tests that look at one editor.
+    _state["active_tree_ptr"] = ptr
+    _state["active_kind"] = kind
+    _state["active_path"] = path
+    if not pinned:
+        _state["src_hint"] = hint
+    return ent
 
 
 def draw_callback():
@@ -2316,26 +2517,10 @@ def draw_callback():
     path = [p.node_tree.as_pointer() for p in space.path if p.node_tree is not None]
     if not path or path[-1] != ptr:
         path = [ptr]
-    if (_state["active_tree_ptr"] != ptr or _state["active_kind"] != kind
-            or _state["active_path"] != path):
-        # Switched to a different node tree / editor type: re-queue so an
-        # enabled editor auto-refreshes once on switch (when Auto Update is on),
-        # instead of waiting for a depsgraph update or a manual Refresh.
-        _state["dirty"] = True
-    _state["active_tree_ptr"] = ptr
-    _state["active_kind"] = kind
-    _state["active_path"] = path
-    _record_hint(ctx, space)
+    # A new or changed view (other tree / editor type / path / source /
+    # selection) re-queues once, so the editor auto-refreshes on switch.
+    ent = _record_editor(ctx, space, ptr, kind, path, props, tree)
     _ensure_timer()
-
-    # In 'Selected' scope, a selection change has no depsgraph update, so watch
-    # it here and mark dirty when the set of selected nodes changes.
-    if getattr(props, "preview_scope", "ALL") == "SELECTED":
-        sig = (tree.as_pointer(),
-               tuple(sorted(n.name for n in tree.nodes if n.select)))
-        if _state.get("sel_sig") != sig:
-            _state["sel_sig"] = sig
-            _state["dirty"] = True
 
     region = ctx.region
     v2d = region.view2d
@@ -2424,8 +2609,13 @@ def draw_callback():
             cols, cw, gh, gx0, gy0 = layout(len(cells))
             jobs.append((node == active and z != 1.0, node, cells, cols,
                          gx0, gy0, gw, gh, cw))
-    _state["visible"] = visible
-    _state["priority"] = priority
+    # The queue serves every editor: render order uses all of their sets.
+    ent["visible"], ent["priority"] = visible, priority
+    vis, pri = set(), set()
+    for e in _state["editors"].values():
+        vis |= e["visible"]
+        pri |= e["priority"]
+    _state["visible"], _state["priority"] = vis, pri
 
     gpu.state.blend_set("ALPHA")
     # The enlarged active node last, so it sits on top of its neighbours.
@@ -2966,6 +3156,7 @@ class NPV_OT_refresh(bpy.types.Operator):
         props = context.scene.npv
         sp = context.space_data
         path = [p.node_tree for p in sp.path if p.node_tree is not None]
+        _state["src_hint"] = _editor_hint(context, sp)
         rebuild_queue(sp.edit_tree, space_kind(sp), props, force=True,
                       path=path or None)
         _ensure_timer()
@@ -3070,6 +3261,7 @@ class NPV_OT_export(bpy.types.Operator):
         kind = space_kind(sp)
         fp = bpy.path.ensure_ext(bpy.path.abspath(self.filepath), ".png")
         path = [p.node_tree for p in sp.path if p.node_tree is not None]
+        _state["src_hint"] = _editor_hint(context, sp)
         job = export_job(sp.edit_tree, kind, props, node, path or None)
         if job is None:
             self.report({"WARNING"}, "This node can't be previewed here")
@@ -3448,6 +3640,7 @@ def unregister():
         _state["draw_handle"] = None
     _reset_cache()
     _state["src_hint"] = []
+    _state["editors"].clear()
     _state["shader_image"] = None
     _state["shader_color"] = None
     _cleanup_datablocks()
