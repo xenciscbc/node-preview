@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/world/geometry/compositor).",
@@ -854,7 +854,16 @@ def _render_scene(scn):
     # Override only the scene: adding a window makes render report FINISHED
     # without writing the file.
     with bpy.context.temp_override(scene=scn):
-        bpy.ops.render.render(write_still=True)
+        bpy.ops.render.render(write_still=False)
+    # Save the result ourselves: write_still=True logs a "Saved: '...'" line
+    # to the console for every thumbnail, burying real errors. save_render
+    # with the scene applies its colour management and file format, so the
+    # file is identical to what write_still wrote.
+    img = next((i for i in bpy.data.images if i.type == "RENDER_RESULT"), None) \
+        or bpy.data.images.get("Render Result")
+    if img is None:
+        raise RuntimeError("render produced no Render Result")
+    img.save_render(path, scene=scn)
     if not os.path.isfile(path):
         raise RuntimeError("render finished without writing %s" % path)
     return path

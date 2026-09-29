@@ -142,7 +142,7 @@ Upload the zip that `python build_extension.py` wrote to `dist/` (the build
 already ran `extension validate` on it). To re-check a zip by hand:
 
 ```
-blender --command extension validate dist/node_preview-1.4.0.zip
+blender --command extension validate dist/node_preview-1.4.1.zip
 ```
 
 ## License
