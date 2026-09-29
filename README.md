@@ -60,8 +60,9 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 ## Install
 
 ### As a Blender Extension (Blender 5.2+)
-`Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.4.0.zip`.
+Download `node_preview-<version>.zip` from the
+[Releases](https://github.com/xenciscbc/node-preview/releases) page, then
+`Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick it.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -78,8 +79,7 @@ extension/
   blender_manifest.toml           Extension manifest (metadata for Extensions)
   __init__.py                     Extension entry — generated from the .py above
                                   with the bl_info block removed
-dist/
-  node_preview-1.3.0.zip          Packaged extension (manifest + __init__.py)
+dist/                             Built zips (not in git; attached to Releases)
 build_extension.py                Rebuilds the extension zip from the source .py
                                   (gated on the tests below)
 run_tests.py                      Runs tests/ in headless Blender
@@ -99,8 +99,10 @@ python build_extension.py
 to regenerate `extension/__init__.py` and `dist/node_preview-<ver>.zip`.
 
 The build is gated; nothing is written unless all of these pass:
-1. `bl_info` version equals the manifest version and is newer than every other
-   zip in `dist/`.
+1. `bl_info` version equals the manifest version and is newer than every
+   release tag (`vX.Y.Z`) in git; if `v<ver>` already exists it must point at
+   the current commit (rebuilding that release). Run `git fetch --tags` first
+   in a fresh clone.
 2. The headless test suite passes against the stripped extension code.
 3. `blender --command extension validate` accepts the zip.
 
@@ -117,6 +119,18 @@ python run_tests.py extension/__init__.py    # against the built extension
 
 Checks that need the real node-editor UI are listed in
 `tests/gui_checklist.md`.
+
+## Releasing
+
+1. Bump the version in `bl_info` (`node_preview_thumbnails.py`) and in
+   `extension/blender_manifest.toml`, then run `python build_extension.py`.
+2. Commit `node_preview_thumbnails.py`, `extension/`, and merge to `main`.
+3. On GitHub: **Releases → Draft a new release**, tag `v<ver>` on `main`
+   (created on publish), attach `dist/node_preview-<ver>.zip`, publish.
+   Once the tag exists, the next build refuses the same version.
+
+Zips of versions before 1.4.0 are in git history, e.g.
+`git show v1.3.0:dist/node_preview-1.3.0.zip > node_preview-1.3.0.zip`.
 
 ## Publishing to extensions.blender.org
 

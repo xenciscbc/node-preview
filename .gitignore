@@ -6,6 +6,8 @@ __pycache__/
 
 # Build / scratch
 _to_delete/
+# Packaged zips are attached to GitHub Releases, not committed.
+dist/
 
 # Blender
 *.blend1
