@@ -43,3 +43,9 @@ actually drawn in the node editor. Rules:
 | 20 | Any | Play the animation with Update on Frame Change off, then on (tree with a Scene Time node) | Off: playback is smooth and previews wait until it stops. On: previews follow the frame |
 | 21 | Compositor | Temp scene whose Output format is OpenEXR; enable Compositor previews | Thumbnails look normal (not grey Value swatches); the scene's output format is unchanged |
 | 22 | Any | Make a node fail (e.g. compositor Render Layers in a scene without a camera) | Red outline / `!`, panel shows "n preview(s) failed"; editing another node does not re-run it; Refresh does |
+| 23 | Geometry Nodes | Two temp objects sharing one GN tree; open two node editors on it, pin one (pin icon) to the non-active object | Previews settle: "Rendering... n left" disappears and stays gone; no endless re-rendering while the mouse moves between the editors |
+| 24 | Geometry Nodes | Same setup, Quality High: press Refresh and switch the active object before the queue finishes | Once the queue empties, every thumbnail matches the object that is active now (none left showing the other one) |
+| 25 | Any | Make a node fail as in #22, then Ctrl+Z the edit that broke it | The red outline / `!` disappears and the panel's failed count drops, without pressing Refresh |
+| 26 | Shader | Large material (30+ nodes), Cycles, Quality High; select one node and press Refresh; then try Time Budget 50 vs 1000 | The selected node and the on-screen ones fill in first; at 50 ms the editor stays responsive while rendering (pan / zoom don't stall for seconds) |
+| 27 | Shader | Material editor open; drag an object around in the 3D viewport | The panel never shows "Rendering..."; no thumbnail flickers or re-renders |
+| 28 | Any | Try Ctrl+Alt+P / Ctrl+Alt+R / Ctrl+Alt+Z in the node editor; check Preferences > Keymap > Node Editor for conflicts | Each shortcut does its job, and none of them takes over a binding you rely on |

@@ -1495,6 +1495,9 @@ def _light_sig(props):
 def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
              chain=None):
     if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
+        # Back to what the thumbnail shows (e.g. undo after a failing edit):
+        # a failure recorded for another hash no longer applies.
+        _state["failed"].pop(key, None)
         return
     # A render that failed is not retried until something it depends on
     # changes (or Refresh forces it): otherwise every edit anywhere in the
@@ -1502,9 +1505,13 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
     if not force and _state["failed"].get(key) == h:
         return
     if key in _state["queued_keys"]:
+        # Still waiting: render it with what the hash now describes (the
+        # source may have changed, e.g. another object made active).
         for it in _state["queue"]:
             if it["key"] == key:
-                it["hash"] = h
+                it.update({"hash": h, "src": src[1], "src_type": src[0],
+                           "root": (root or tree).name,
+                           "chain": list(chain or ())})
                 break
         return
     _state["queue"].append({"kind": kind, "src": src[1], "src_type": src[0],
@@ -2003,7 +2010,15 @@ def _grid_origin(pos, x0, x1, y0, node_h, gw, gh, gap):
 
 def _record_hint(ctx, space):
     """Remember which material / light / object the editor shows so the
-    queue previews through it (see resolve_source)."""
+    queue previews through it (see resolve_source).
+
+    A pinned editor is skipped: it shows its own data-block, and letting it
+    write the (single, global) hint would make it fight an unpinned editor on
+    the same shared tree -- each redraw would flip the source, change every
+    hash and re-render the tree forever. Unpinned editors all follow the
+    active object / material, so they agree."""
+    if getattr(space, "pin", False):
+        return
     hint = []
     for d in (getattr(space, "id", None), getattr(space, "id_from", None),
               getattr(ctx, "active_object", None)):
@@ -2015,6 +2030,7 @@ def _record_hint(ctx, space):
             hint.append(("OBJ", d.name))
             if isinstance(d.data, bpy.types.Light):
                 hint.append(("LIGHT", d.data.name))
+    hint = list(dict.fromkeys(hint))
     if hint != _state.get("src_hint"):
         _state["src_hint"] = hint
         _state["dirty"] = True

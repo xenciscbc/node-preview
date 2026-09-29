@@ -765,3 +765,79 @@ def test_panel_and_prefs_draw(mod):
     finally:
         bpy.context.scene.npv.preview_scope = "ALL"
         bpy.data.materials.remove(mat)
+
+
+# --------------------------------------------------------------------------- #
+#  12. Review fixes
+# --------------------------------------------------------------------------- #
+def test_queued_item_follows_a_source_switch(mod):
+    ng, (a, b) = _shared_gn()
+    props = _props()
+    props.preview_geometry = True
+    try:
+        _clear(mod)
+        mod._state["src_hint"] = [("OBJ", b.name)]
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert mod._state["queue"][0]["src"] == b.name
+        # Switch before anything rendered: the waiting item must follow.
+        mod._state["src_hint"] = [("OBJ", a.name)]
+        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        assert len(mod._state["queue"]) == 1
+        assert mod._state["queue"][0]["src"] == a.name, \
+            "queued item kept the old source under the new hash"
+    finally:
+        props.preview_geometry = False
+        _clear(mod)
+        for ob in (a, b):
+            me = ob.data
+            bpy.data.objects.remove(ob)
+            bpy.data.meshes.remove(me)
+        bpy.data.node_groups.remove(ng)
+
+
+def test_pinned_editor_does_not_overwrite_the_hint(mod):
+    ng, (a, b) = _shared_gn()
+
+    def space(pin, obj):
+        return type("Space", (), {"pin": pin, "id": obj, "id_from": None})()
+
+    ctx = type("Ctx", (), {"active_object": b})()
+    try:
+        _clear(mod)
+        mod._record_hint(ctx, space(False, b))
+        assert mod._state["src_hint"] == [("OBJ", b.name)]
+        mod._state["dirty"] = False
+        # A pinned editor on A redrawing in between must not flip the hint.
+        for _ in range(3):
+            mod._record_hint(ctx, space(True, a))
+            mod._record_hint(ctx, space(False, b))
+        assert mod._state["src_hint"] == [("OBJ", b.name)]
+        assert not mod._state["dirty"], "two editors keep re-queueing each other"
+    finally:
+        _clear(mod)
+        for ob in (a, b):
+            me = ob.data
+            bpy.data.objects.remove(ob)
+            bpy.data.meshes.remove(me)
+        bpy.data.node_groups.remove(ng)
+
+
+def test_undo_to_the_shown_thumbnail_clears_the_failure(mod):
+    mat = _emission_material("NPV_t140_undo", lambda nt: _math(nt, "ADD", 1, 2))
+    props = _props()
+    props.only_tex_shader = False
+    try:
+        _clear(mod)
+        nt = mat.node_tree
+        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        _mark_rendered(mod)
+        key = next(k for k in mod._state["textures"] if k.split(":", 1)[1].startswith("Src|"))
+        # An edit whose render failed, then undone.
+        mod._state["failed"][key] = "hash-of-the-failing-edit"
+        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        assert not mod._state["queue"]
+        assert key not in mod._state["failed"], "stale failure marker kept after undo"
+    finally:
+        props.only_tex_shader = True
+        _clear(mod)
+        bpy.data.materials.remove(mat)
