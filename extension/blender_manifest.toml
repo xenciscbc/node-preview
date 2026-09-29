@@ -21,4 +21,4 @@ license = [
 # reads them back to build the on-screen thumbnails; Export saves one as a PNG
 # where the user chooses.
 [permissions]
-files = "Write and read temporary preview-render images, save exported previews"
+files = "Temporary preview renders; PNG export of node previews"

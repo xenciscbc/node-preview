@@ -60,3 +60,18 @@ def test_extension_build_carries_the_note(mod):
     assert "bl_info = {" not in out, "bl_info kept"
     assert "# NOTE: This is the Blender Extension build." in out, \
         "extension note not inserted"
+
+
+def test_manifest_strings_fit_blenders_limits(mod):
+    # 'extension validate' rejects a tagline or permission text over 64
+    # characters, or one ending in punctuation (the files permission once
+    # had 70 and only failed at the final build step).
+    import re
+    text = open(be.MANIFEST, encoding="utf-8").read()
+    perms = text.split("[permissions]", 1)[1] if "[permissions]" in text else ""
+    checks = [("tagline", be.read_field(text, "tagline", ""))]
+    checks += re.findall(r'^(\w+)\s*=\s*"([^"]*)"', perms, re.MULTILINE)
+    for key, val in checks:
+        assert val, "%s is empty" % key
+        assert len(val) <= 64, "%s is %d characters (max 64): %r" % (key, len(val), val)
+        assert val[-1] not in ".!?,;:", "%s ends with punctuation: %r" % (key, val)
