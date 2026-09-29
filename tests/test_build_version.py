@@ -52,3 +52,11 @@ def test_real_checkout_has_release_tags(mod):
         print("  (skipped: git not available)")
         return
     assert all(t.count(".") == 2 for t in tags), tags
+
+
+def test_extension_build_carries_the_note(mod):
+    src = open(be.SRC, "r", encoding="utf-8").read()
+    out = be.strip_bl_info(src)
+    assert "bl_info = {" not in out, "bl_info kept"
+    assert "# NOTE: This is the Blender Extension build." in out, \
+        "extension note not inserted"

@@ -45,6 +45,7 @@ import os
 import time
 import shutil
 import hashlib
+import zlib
 
 import bpy
 import bmesh
@@ -118,6 +119,8 @@ _state = {
     "priority": set(),    # keys of the active / selected nodes (rendered first)
     "src_hint": [],       # (kind, name) of the data-blocks the editor shows
     "export_to": None,    # file path: the next render is copied there instead
+    "data_gen": {},       # object data name -> update counter (mesh edits)
+    "tree_sig_memo": None,  # tree pointer -> tree_signature, during a rebuild
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 
@@ -223,7 +226,21 @@ def _preview_targets(node, kind, props):
 
 # Keep a reference to dynamically-built enum item lists so Blender does not
 # free the underlying strings (a well-known dynamic-EnumProperty pitfall).
+# Keyed by the items themselves: one entry per distinct socket list, not one
+# per node ever drawn.
 _socket_enum_cache = {}
+
+
+def _enum_num(ident, used):
+    """Stable, non-zero item number for ``ident``. Blender stores a dynamic
+    enum's value as this number, so numbering by position would make a saved
+    choice point at another item once the list changes (a socket enabled or
+    disabled, another Blender's set of HDRIs)."""
+    n = (zlib.crc32(ident.encode("utf-8")) & 0x3FFFFFFF) or 1
+    while n in used:
+        n = n % 0x3FFFFFFF + 1
+    used.add(n)
+    return n
 
 
 def _npv_socket_items(self, context):
@@ -231,11 +248,12 @@ def _npv_socket_items(self, context):
     kind = _tree_kind(node.id_data) if node.id_data is not None else KIND_SHADER
     items = [("AUTO", "Auto (first linked)",
               "Preview the first linked output, or the first output if none is linked", 0)]
-    for i, s in enumerate(_previewable_outputs(node, kind)):
+    used = {0}
+    for s in _previewable_outputs(node, kind):
         label = s.name or s.identifier
-        items.append((s.identifier, label, "Preview the '%s' output" % label, i + 1))
-    _socket_enum_cache[node.as_pointer()] = items
-    return items
+        items.append((s.identifier, label, "Preview the '%s' output" % label,
+                      _enum_num(s.identifier, used)))
+    return _socket_enum_cache.setdefault(tuple(items), items)
 
 
 def _shader_eligible(node, only_tex_shader):
@@ -333,6 +351,63 @@ def _image_sig(img):
     return tuple(sig)
 
 
+def _plain(v):
+    """A property value as a hashable, repr-stable Python value."""
+    if isinstance(v, bpy.types.ID):
+        return ("ID", v.name)
+    if isinstance(v, float):
+        return round(v, 6)
+    if isinstance(v, (bool, int, str)) or v is None:
+        return v
+    if isinstance(v, (set, frozenset)):
+        return tuple(sorted(v))
+    if hasattr(v, "to_dict"):          # IDPropertyGroup
+        return tuple(sorted((k, _plain(x)) for k, x in v.to_dict().items()))
+    if hasattr(v, "to_list"):          # IDPropertyArray
+        return tuple(_plain(x) for x in v.to_list())
+    if isinstance(v, dict):
+        return tuple(sorted((k, _plain(x)) for k, x in v.items()))
+    try:
+        return tuple(_plain(x) for x in v)
+    except TypeError:
+        return str(v)
+
+
+# The sequence frame an Image User shows follows the scene frame; the frame is
+# only part of the hash with 'Update on Frame Change' (see rebuild_queue).
+_STRUCT_SKIP = {"rna_type", "frame_current"}
+
+
+def _simple_props_sig(struct):
+    """Writable plain settings (bool / int / float / string / enum) of an RNA
+    struct, plus the names of the data-blocks it points to. Only these types,
+    so nothing whose text holds a memory address can make the hash unstable."""
+    vals = []
+    for p in struct.bl_rna.properties:
+        pid = p.identifier
+        if pid in _STRUCT_SKIP or p.is_readonly and p.type != "POINTER":
+            continue
+        try:
+            if p.type == "POINTER":
+                ref = getattr(struct, pid)
+                if ref is None or isinstance(ref, bpy.types.ID):
+                    vals.append((pid, ref.name if ref is not None else None))
+            elif p.type in {"BOOLEAN", "INT", "FLOAT", "STRING", "ENUM"}:
+                vals.append((pid, _plain(getattr(struct, pid))))
+        except Exception:
+            pass
+    return tuple(vals)
+
+
+def _curve_sig(cm):
+    """A CurveMapping (RGB / Vector / Float Curve, compositor Curves ...):
+    its settings and every curve point."""
+    return (_simple_props_sig(cm), tuple(
+        tuple((round(pt.location[0], 5), round(pt.location[1], 5), pt.handle_type)
+              for pt in c.points)
+        for c in cm.curves))
+
+
 def _node_settings(node, _seen=frozenset()):
     vals = []
     for p in node.bl_rna.properties:
@@ -347,8 +422,14 @@ def _node_settings(node, _seen=frozenset()):
                 elif isinstance(ref, bpy.types.NodeTree):
                     # Group node: its contents are part of its result.
                     vals.append((pid, ref.name, tree_signature(ref, _seen)))
-                else:
+                elif ref is None or isinstance(ref, bpy.types.ID):
                     vals.append((pid, ref.name if ref is not None else None))
+                elif isinstance(ref, bpy.types.CurveMapping):
+                    vals.append((pid, _curve_sig(ref)))
+                else:
+                    # Other settings structs (Image User: sequence frames,
+                    # Texture / Color Mapping ...). The color ramp is below.
+                    vals.append((pid, _simple_props_sig(ref)))
             except Exception:
                 pass
             continue
@@ -396,6 +477,11 @@ def tree_signature(tree, _seen=frozenset()):
     ptr = tree.as_pointer()
     if ptr in _seen:
         return "cycle"
+    # Within one rebuild_queue pass a group used by many group nodes is
+    # walked once.
+    memo = _state.get("tree_sig_memo")
+    if memo is not None and ptr in memo:
+        return memo[ptr]
     seen = _seen | {ptr}
     parts = []
     for n in tree.nodes:
@@ -408,7 +494,10 @@ def tree_signature(tree, _seen=frozenset()):
     for l in tree.links:
         parts.append((l.from_node.name, l.from_socket.identifier,
                       l.to_node.name, l.to_socket.identifier))
-    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+    hv = hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+    if memo is not None:
+        memo[ptr] = hv
+    return hv
 
 
 # --------------------------------------------------------------------------- #
@@ -458,10 +547,11 @@ def _env_items(self, context):
                        if f.lower().endswith((".exr", ".hdr")))
     except OSError:
         files = []
-    for i, f in enumerate(files):
+    used = {0}
+    for f in files:
         label = os.path.splitext(f)[0].replace("_", " ").title()
         items.append((f, label, "Light the preview with Blender's '%s' HDRI" % label,
-                      i + 1))
+                      _enum_num(f, used)))
     _env_enum_cache[:] = items
     return items
 
@@ -671,11 +761,19 @@ def _finish(path):
 def _render_scene(scn):
     ext = ".exr" if scn.render.image_settings.file_format == "OPEN_EXR" else ".png"
     path = os.path.join(bpy.app.tempdir, "npv_render" + ext)
+    # The previous preview's file must not pass for this one if the render
+    # writes nothing.
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
     scn.render.filepath = path
     # Override only the scene: adding a window makes render report FINISHED
     # without writing the file.
     with bpy.context.temp_override(scene=scn):
         bpy.ops.render.render(write_still=True)
+    if not os.path.isfile(path):
+        raise RuntimeError("render finished without writing %s" % path)
     return path
 
 
@@ -760,9 +858,8 @@ def _route_out(top_tree, chain, node_name, pick):
         stype = {"SHADER": "NodeSocketShader", "VALUE": "NodeSocketFloat",
                  "GEOMETRY": "NodeSocketGeometry"}.get(sock.type, "NodeSocketColor")
         item = g.interface.new_socket("NPV Preview", in_out="OUTPUT", socket_type=stype)
-        outs = [n for n in g.nodes if n.bl_idname == "NodeGroupOutput"]
-        gout = next((n for n in outs if n.is_active_output), None) \
-            or (outs[0] if outs else g.nodes.new("NodeGroupOutput"))
+        gout = _active_output(g.nodes, "NodeGroupOutput") \
+            or g.nodes.new("NodeGroupOutput")
         gin = next((i for i in gout.inputs if i.identifier == item.identifier), None)
         nxt = next((o for o in inst.outputs if o.identifier == item.identifier), None)
         if gin is None or nxt is None:
@@ -770,6 +867,36 @@ def _route_out(top_tree, chain, node_name, pick):
         g.links.new(sock, gin)
         sock = nxt
     return node, sock, copies
+
+
+def _active_output(nodes, idname):
+    """The output node of type ``idname`` Blender uses (the active one), else
+    the first, else None."""
+    outs = [n for n in nodes if n.bl_idname == idname]
+    return next((n for n in outs if getattr(n, "is_active_output", False)),
+                outs[0] if outs else None)
+
+
+def _sole_output(nt, idname, keep=None):
+    """Make ``keep`` (default: the active one, created if missing) the only
+    ``idname`` output of the throwaway tree ``nt``, set to render for every
+    engine. With several outputs (e.g. one per engine) the render would use
+    whichever one Blender picks, not necessarily the one wired here."""
+    keep = keep or _active_output(nt.nodes, idname) or nt.nodes.new(idname)
+    for n in [n for n in nt.nodes if n.bl_idname == idname and n != keep]:
+        nt.nodes.remove(n)
+    if hasattr(keep, "target"):
+        try:
+            keep.target = "ALL"
+        except Exception:
+            pass
+    return keep
+
+
+def _unlink(nt, sock):
+    if sock is not None:
+        for l in list(sock.links):
+            nt.links.remove(l)
 
 
 def _remove_groups(groups):
@@ -873,16 +1000,23 @@ def render_shader(src_mat, node_name, res, props, out_id=None, chain=None):
             osock = _out_by_id(node, out_id)
         is_output = node.bl_idname in SHADER_OUTPUT_NODES and not chain
         is_shader = is_output or (osock is not None and osock.type == "SHADER")
-        if not is_output:
-            out = next((n for n in nt.nodes
-                        if n.bl_idname == "ShaderNodeOutputMaterial"), None) \
-                or nt.nodes.new("ShaderNodeOutputMaterial")
+        if is_output:
+            # The output itself: the whole material, as that output renders it.
+            _sole_output(nt, "ShaderNodeOutputMaterial",
+                         node if node.bl_idname == "ShaderNodeOutputMaterial" else None)
+        else:
+            out = _sole_output(nt, "ShaderNodeOutputMaterial")
             surf = out.inputs["Surface"]
-            for l in list(surf.links):
-                nt.links.remove(l)
+            # Only the previewed node: the material's own volume and
+            # displacement would fog / deform it.
+            for sk in (surf, out.inputs.get("Volume"), out.inputs.get("Displacement")):
+                _unlink(nt, sk)
             if osock is None:
                 return None
-            if osock.type == "SHADER":
+            if osock.type == "SHADER" and node.bl_idname in VOLUME_NODES \
+                    and out.inputs.get("Volume") is not None:
+                nt.links.new(osock, out.inputs["Volume"])
+            elif osock.type == "SHADER":
                 nt.links.new(osock, surf)
             elif osock.type == "VALUE" and _want_value(props):
                 _value_emission(nt, osock, surf)
@@ -924,7 +1058,9 @@ def _frame_object(scn, cam, obj):
             dg = bpy.context.evaluated_depsgraph_get()
             dg.update()
             ev = obj.evaluated_get(dg)
-            corners = [obj.matrix_world @ Vector(c[:]) for c in ev.bound_box]
+            # The evaluated matrix: this depsgraph isn't the active one, so
+            # ``obj.matrix_world`` still holds the user's object placement.
+            corners = [ev.matrix_world @ Vector(c[:]) for c in ev.bound_box]
         center = sum(corners, Vector()) / 8.0
         radius = max((c - center).length for c in corners) or 1.0
     except Exception:
@@ -995,7 +1131,7 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=No
                 ng2, chain, node_name, lambda n: _geometry_out(n, out_id))
         else:
             gos = _geometry_out(ng2.nodes.get(node_name), out_id)
-        go = next((n for n in ng2.nodes if n.bl_idname == "NodeGroupOutput"), None)
+        go = _active_output(ng2.nodes, "NodeGroupOutput")
         goin = next((i for i in go.inputs if i.type == "GEOMETRY"), None) if go else None
         if gos is None or goin is None:
             return None
@@ -1199,7 +1335,7 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
                     n.scene = tmp
         if out is None:
             return None
-        go = next((n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"), None)
+        go = _active_output(tree.nodes, "NodeGroupOutput")
         if go is None:
             go = tree.nodes.new("NodeGroupOutput")
         goin = next((i for i in go.inputs if i.type == "RGBA"), None)
@@ -1235,6 +1371,13 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
         # samples); every compositor node renders the scene once, on the UI
         # thread, so keep each preview render cheap.
         r.use_motion_blur = False
+        # Nor the user's output extras: a VSE edit would replace the
+        # composite, a render region would crop it, stamps burn in text.
+        for attr in ("use_sequencer", "use_border", "use_crop_to_border", "use_stamp"):
+            try:
+                setattr(r, attr, False)
+            except Exception:
+                pass
         try:
             if r.engine == "CYCLES":
                 tmp.cycles.samples = min(tmp.cycles.samples, 16)
@@ -1281,10 +1424,9 @@ def render_world(world, node_name, res, props, out_id=None, chain=None):
             node = wnt.nodes.get(node_name)
         if node is None:
             return None
-        out = node if node.bl_idname == "ShaderNodeOutputWorld" and not chain else \
-            (next((n for n in wnt.nodes
-                   if n.bl_idname == "ShaderNodeOutputWorld"), None)
-             or wnt.nodes.new("ShaderNodeOutputWorld"))
+        out = _sole_output(wnt, "ShaderNodeOutputWorld",
+                           node if node.bl_idname == "ShaderNodeOutputWorld"
+                           and not chain else None)
         is_vol = node.bl_idname in VOLUME_NODES
         scn.world = prevw
         scn.render.film_transparent = False
@@ -1397,13 +1539,34 @@ def find_material_for_tree(tree):
     return None
 
 
+def _idref(d):
+    """How a queue item / hint refers to a data-block: its name, or (name,
+    library path) for linked data, which can share a local data-block's name."""
+    if d.library is None:
+        return d.name
+    return (d.name, d.library.filepath)
+
+
+def _idget(collection, ref):
+    """The data-block ``ref`` (from _idref) names in ``collection``, or None.
+    A plain name only matches local data."""
+    if not ref:
+        return None
+    name, lib = (ref, None) if isinstance(ref, str) else ref
+    d = collection.get(name)
+    if d is not None and (d.library.filepath if d.library else None) == lib:
+        return d
+    return next((d for d in collection if d.name == name
+                 and (d.library.filepath if d.library else None) == lib), None)
+
+
 def _hinted(cls, collection):
     """Data-blocks of ``cls`` the editor was last seen showing (its id /
     id_from and the active object), most specific first."""
     out = []
     for c, name in _state.get("src_hint") or ():
         if c == cls:
-            d = collection.get(name)
+            d = _idget(collection, name)
             if d is not None and d not in out:
                 out.append(d)
     return out
@@ -1420,28 +1583,28 @@ def resolve_source(tree, kind):
     if kind == KIND_SHADER:
         for m in _hinted("MAT", bpy.data.materials):
             if m.node_tree is not None and m.node_tree == tree:
-                return ("MAT", m.name)
+                return ("MAT", _idref(m))
         m = find_material_for_tree(tree)
         if m:
-            return ("MAT", m.name)
+            return ("MAT", _idref(m))
         for lt in _hinted("LIGHT", bpy.data.lights) + list(bpy.data.lights):
             if getattr(lt, "node_tree", None) is not None and lt.node_tree == tree:
-                return ("LIGHT", lt.name)
+                return ("LIGHT", _idref(lt))
         return None
     if kind == KIND_GEO:
         for obj in _hinted("OBJ", bpy.data.objects) + list(bpy.data.objects):
             if _uses_geo_tree(obj, tree):
-                return ("OBJ", obj.name)
+                return ("OBJ", _idref(obj))
         return None
     if kind == KIND_COMP:
         for s in bpy.data.scenes:
             if getattr(s, "compositing_node_group", None) == tree:
-                return ("SCENE", s.name)
+                return ("SCENE", _idref(s))
         return None
     if kind == KIND_WORLD:
         for w in bpy.data.worlds:
             if w.node_tree is not None and w.node_tree == tree:
-                return ("WORLD", w.name)
+                return ("WORLD", _idref(w))
         return None
     return None
 
@@ -1520,23 +1683,66 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
         for it in _state["queue"]:
             if it["key"] == key:
                 it.update({"hash": h, "src": src[1], "src_type": src[0],
-                           "root": (root or tree).name,
+                           "root": _idref(root or tree),
                            "chain": list(chain or ())})
                 break
         return
     _state["queue"].append({"kind": kind, "src": src[1], "src_type": src[0],
-                            "tree": tree.name,
-                            "root": (root or tree).name,
+                            "tree": _idref(tree),
+                            "root": _idref(root or tree),
                             "chain": list(chain or ()),
                             "node": node_name, "out": out_id, "key": key,
                             "hash": h})
     _state["queued_keys"].add(key)
 
 
+_MOD_UI_PROPS = {"name", "is_active", "is_override_data", "use_pin_to_last",
+                 "show_expanded", "show_in_editmode", "show_on_cage"}
+
+
+def _modifier_sig(m):
+    """A modifier's settings and its ID-property inputs (a Geometry Nodes
+    modifier keeps its input values there), minus panel / UI state."""
+    vals = [(pid, v) for pid, v in _simple_props_sig(m)
+            if pid not in _MOD_UI_PROPS and not pid.startswith("open_")
+            and not (pid.startswith("show_")
+                     and pid not in ("show_viewport", "show_render"))]
+    try:
+        idp = tuple(sorted((k, _plain(m[k])) for k in m.keys()))
+    except Exception:
+        idp = ()
+    return (m.type, tuple(vals), idp)
+
+
+def _geo_source_sig(obj_ref, root):
+    """What a Geometry Nodes preview depends on outside its node tree: the
+    modifier's input values, the modifiers below it in the stack, and the
+    object's own data (counted by _on_depsgraph while it is edited)."""
+    obj = _idget(bpy.data.objects, obj_ref)
+    if obj is None:
+        return ""
+    idx = _geo_modifier_index(obj, root)
+    if idx is None:
+        return ""
+    parts = [_modifier_sig(m) for m in list(obj.modifiers)[:idx + 1]]
+    data = obj.data
+    if data is not None:
+        parts.append((data.name, _state["data_gen"].get(data.name, 0)))
+    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
 def rebuild_queue(tree, kind, props, force=False, path=None):
     """Queue the eligible nodes of ``tree`` whose hash changed. ``path`` is the
     editor's tree path (outermost first, ending with ``tree``); when it is
     longer than one, ``tree`` is a node group entered from path[0]."""
+    _state["tree_sig_memo"] = {}
+    try:
+        _rebuild_queue(tree, kind, props, force, path)
+    finally:
+        _state["tree_sig_memo"] = None
+
+
+def _rebuild_queue(tree, kind, props, force, path):
     path = list(path) if path else [tree]
     if path[-1].as_pointer() != tree.as_pointer():
         path = [tree]
@@ -1560,6 +1766,8 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
         esig += "|f%d" % bpy.context.scene.frame_current
     if chain:
         esig += "|" + _context_sig(src, path, chain)
+    if kind == KIND_GEO:
+        esig += "|" + _geo_source_sig(src[1], root)
     lsig = _light_sig(props)
     memo = {}
     live = set()
@@ -1586,6 +1794,14 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
     for key in [k for k in set(_state["textures"]) | set(_state["failed"])
                 if k.startswith(prefix) and k not in live]:
         _drop_texture(key)
+    # Their pending renders too (e.g. Scope switched to Selected while a
+    # compositor tree was queued: each one would render the whole scene).
+    q = _state["queue"]
+    stale = [it for it in q if it["key"].startswith(prefix) and it["key"] not in live]
+    if stale:
+        q[:] = [it for it in q if not (it["key"].startswith(prefix)
+                                        and it["key"] not in live)]
+        _state["queued_keys"].difference_update(it["key"] for it in stale)
 
 
 def _touch(key):
@@ -1603,7 +1819,8 @@ def _drop_texture(key):
 
 def _reset_cache():
     """Forget every thumbnail, pending render and failure."""
-    for k in ("textures", "tex_tick", "img_gen", "hashes", "failed", "values"):
+    for k in ("textures", "tex_tick", "img_gen", "data_gen", "hashes", "failed",
+              "values"):
         _state[k].clear()
     _state["queue"].clear()
     _state["queued_keys"].clear()
@@ -1687,23 +1904,43 @@ def _render_item(item, res, props):
     chain = item.get("chain") or None
     if k == KIND_SHADER:
         if item.get("src_type") == "LIGHT":
-            m = bpy.data.lights.get(item["src"])
+            m = _idget(bpy.data.lights, item["src"])
         else:
-            m = bpy.data.materials.get(item["src"])
+            m = _idget(bpy.data.materials, item["src"])
         return render_shader(m, item["node"], res, props, oid, chain) if m else None
     if k == KIND_WORLD:
-        w = bpy.data.worlds.get(item["src"])
+        w = _idget(bpy.data.worlds, item["src"])
         return render_world(w, item["node"], res, props, oid, chain) if w else None
     if k == KIND_GEO:
-        o = bpy.data.objects.get(item["src"])
-        t = bpy.data.node_groups.get(item.get("tree") or "")
-        r = bpy.data.node_groups.get(item.get("root") or "") or t
+        o = _idget(bpy.data.objects, item["src"])
+        t = _idget(bpy.data.node_groups, item.get("tree"))
+        r = _idget(bpy.data.node_groups, item.get("root")) or t
         return render_geo(o, item["node"], res, props, oid, t, chain, r) \
             if o and t else None
     if k == KIND_COMP:
-        s = bpy.data.scenes.get(item["src"])
+        s = _idget(bpy.data.scenes, item["src"])
         return render_compositor(s, item["node"], res, props, oid, chain) if s else None
     return None
+
+
+def _queue_allowed(item, props):
+    """False for a pending render whose preview type was switched off since
+    it was queued (Compositor, Geometry Nodes, World, compositor groups)."""
+    kind = item.get("kind")
+    if kind is not None and not _kind_enabled(kind, props):
+        return False
+    if kind == KIND_COMP and item.get("chain") \
+            and not getattr(props, "comp_groups", True):
+        return False
+    return True
+
+
+def _drop_disallowed(props):
+    q = _state["queue"]
+    drop = [it for it in q if not _queue_allowed(it, props)]
+    if drop:
+        q[:] = [it for it in q if _queue_allowed(it, props)]
+        _state["queued_keys"].difference_update(it["key"] for it in drop)
 
 
 def process_queue(props):
@@ -1785,6 +2022,7 @@ def _timer():
         tree, kind, path = _resolve_active()
         if tree is not None and _kind_enabled(kind, props):
             rebuild_queue(tree, kind, props, force=False, path=path)
+    _drop_disallowed(props)
     rendered = process_queue(props)
     _state["prune_in"] -= 1
     if _state["prune_in"] <= 0:
@@ -1806,6 +2044,10 @@ def _ensure_timer():
     _state["timer_running"] = True
 
 
+_DATA_ID_TYPES = {"MESH", "CURVE", "CURVES", "POINTCLOUD", "VOLUME", "LATTICE",
+                  "META", "FONT", "GREASEPENCIL", "GREASEPENCIL_V3"}
+
+
 @persistent
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
@@ -1820,6 +2062,12 @@ def _on_depsgraph(scene, depsgraph):
             # image's hash so textures using it re-render.
             name = upd.id.name
             _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
+            _state["dirty"] = True
+        elif idt in _DATA_ID_TYPES:
+            # Editing an object's own data (edit-mode mesh edits, ...): the
+            # counter is part of its Geometry Nodes previews' hash.
+            name = upd.id.name
+            _state["data_gen"][name] = _state["data_gen"].get(name, 0) + 1
             _state["dirty"] = True
         elif idt == "OBJECT":
             # Moving / rotating an object changes nothing a preview shows
@@ -2033,13 +2281,13 @@ def _record_hint(ctx, space):
     for d in (getattr(space, "id", None), getattr(space, "id_from", None),
               getattr(ctx, "active_object", None)):
         if isinstance(d, bpy.types.Material):
-            hint.append(("MAT", d.name))
+            hint.append(("MAT", _idref(d)))
         elif isinstance(d, bpy.types.Light):
-            hint.append(("LIGHT", d.name))
+            hint.append(("LIGHT", _idref(d)))
         elif isinstance(d, bpy.types.Object):
-            hint.append(("OBJ", d.name))
+            hint.append(("OBJ", _idref(d)))
             if isinstance(d.data, bpy.types.Light):
-                hint.append(("LIGHT", d.data.name))
+                hint.append(("LIGHT", _idref(d.data)))
     hint = list(dict.fromkeys(hint))
     if hint != _state.get("src_hint"):
         _state["src_hint"] = hint
@@ -2321,7 +2569,7 @@ TR = {
                 ("sec", "Buttons"),
                 ("line", "Refresh:  re-render every node in the current editor."),
                 ("line", "Export:  save the active node's preview as a PNG."),
-                ("line", "Trash:  clear all cached thumbnails."),
+                ("line", "Trash:  clear all cached thumbnails (they render again)."),
             ],
             "FILTER": [
                 ("line", "Only Texture / Shader Nodes:  skip Value / Math nodes."),
@@ -2397,7 +2645,8 @@ TR = {
                 ("line", "Per 100 thumbnails:  ~3 MB (64px), ~13 MB (128px),"),
                 ("line", "        ~50 MB (256px)."),
                 ("line", "Thumbnails of deleted nodes are released automatically."),
-                ("line", "Trash button:  clear all cached thumbnails now."),
+                ("line", "Trash button:  clear all cached thumbnails now (the"),
+                ("line", "        editor's previews then render again)."),
             ],
         },
     },
@@ -2468,7 +2717,7 @@ TR = {
                 ("sec", "按鈕"),
                 ("line", "刷新：重算目前編輯器中所有節點。"),
                 ("line", "匯出：把作用中節點的預覽存成 PNG。"),
-                ("line", "垃圾桶：清除所有快取縮圖。"),
+                ("line", "垃圾桶：清除所有快取縮圖（之後重新算圖）。"),
             ],
             "FILTER": [
                 ("line", "只有貼圖 / 著色器節點：略過純 Value / Math 節點。"),
@@ -2542,7 +2791,8 @@ TR = {
                 ("line", "每 100 張約：3 MB（64px）、13 MB（128px）、"),
                 ("line", "        50 MB（256px）。"),
                 ("line", "已刪除節點的縮圖會自動釋放。"),
-                ("line", "垃圾桶按鈕：立即清除所有快取縮圖。"),
+                ("line", "垃圾桶按鈕：立即清除所有快取縮圖（目前編輯器"),
+                ("line", "        的預覽會重新算圖）。"),
             ],
         },
     },
@@ -2756,6 +3006,8 @@ class NPV_OT_clear(bpy.types.Operator):
 
     def execute(self, context):
         _reset_cache()
+        # With Auto Update on, the editor's previews render again from scratch.
+        _state["dirty"] = True
         _tag_node_editors()
         self.report({"INFO"}, "Preview cache cleared")
         return {"FINISHED"}
@@ -2772,8 +3024,8 @@ def export_job(tree, kind, props, node, path=None):
     if src is None:
         return None
     oid = _preview_targets(node, kind, props)[0]
-    return {"kind": kind, "src": src[1], "src_type": src[0], "tree": tree.name,
-            "root": path[0].name, "chain": chain, "node": node.name, "out": oid,
+    return {"kind": kind, "src": src[1], "src_type": src[0], "tree": _idref(tree),
+            "root": _idref(path[0]), "chain": chain, "node": node.name, "out": oid,
             "key": None, "hash": None}
 
 

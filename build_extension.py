@@ -93,14 +93,15 @@ def check_version(src, ext_id, version):
 
 
 def strip_bl_info(src):
-    # Strip the bl_info = { ... } block: extensions use the manifest instead.
-    stripped, n = re.subn(r"\nbl_info\s*=\s*\{.*?\n\}\n", "\n", src, count=1,
-                          flags=re.DOTALL)
-    if n != 1:
-        fail("could not find a bl_info block to strip")
+    # Replace the bl_info = { ... } block with a note: extensions use the
+    # manifest instead.
     note = ("\n# NOTE: This is the Blender Extension build. Metadata lives in\n"
             "# blender_manifest.toml (no bl_info needed for extensions).\n")
-    return stripped.replace('"""\n\nimport os', '"""\n' + note + "\nimport os", 1)
+    stripped, n = re.subn(r"\nbl_info\s*=\s*\{.*?\n\}\n", lambda _m: note, src,
+                          count=1, flags=re.DOTALL)
+    if n != 1:
+        fail("could not find a bl_info block to strip")
+    return stripped
 
 
 def validate_zip(zip_path):
