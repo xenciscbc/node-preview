@@ -542,6 +542,18 @@ def upstream_hash(node, memo):
     return hv
 
 
+def _isolated_hash(node):
+    """Hash of what render_geo_swatch uses: the node's own settings and the
+    stored value of every input (linked or not -- the swatch rebuilds the
+    node alone) and output (Value / RGB nodes)."""
+    parts = [node.bl_idname, _node_settings(node)]
+    for inp in node.inputs:
+        parts.append(("D", inp.identifier, _socket_default(inp)))
+    for out in node.outputs:
+        parts.append(("O", out.identifier, _socket_default(out)))
+    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
 def tree_signature(tree, _seen=frozenset()):
     """Whole-tree fingerprint, nested groups included. ``_seen`` holds the
     trees already being walked so a malformed self-nesting can't recurse."""
@@ -2103,7 +2115,12 @@ def _rebuild_queue(tree, kind, props, force, path):
         if skip or not node_eligible(node, kind, props):
             continue
         try:
-            h = upstream_hash(node, memo)
+            if kind == KIND_GEO and not any(s.type == "GEOMETRY" for s in node.outputs):
+                # A field swatch renders the node alone (upstream fields are
+                # not evaluated), so upstream edits can't change it.
+                h = _isolated_hash(node)
+            else:
+                h = upstream_hash(node, memo)
         except Exception:
             continue
         if kind == KIND_SHADER and renders_as_shader(node):
@@ -2355,13 +2372,36 @@ def _live_space_ptrs():
     return ptrs
 
 
+def _live_space_kinds():
+    """Space pointer -> the preview kind it shows now (None for a tree type
+    we don't preview), or None when there are no windows."""
+    wm = bpy.context.window_manager
+    if wm is None or not wm.windows:
+        return None
+    kinds = {}
+    for win in wm.windows:
+        for area in win.screen.areas:
+            if area.type == "NODE_EDITOR":
+                for sp in area.spaces:
+                    if sp.type == "NODE_EDITOR":
+                        kinds[sp.as_pointer()] = (space_kind(sp)
+                                                  if sp.tree_type in KINDS else None)
+    return kinds
+
+
 def _prune_editors():
-    """Forget editors that were closed or switched to another editor type."""
+    """Forget editors that were closed, switched to another editor type, or
+    now show a tree type / preview kind other than the one recorded (the
+    space pointer stays the same when only its tree type changes, and the
+    draw callback that would forget it may run after the next timer tick)."""
     live = _live_space_ptrs()
     if live is None:
         return
+    kinds = _live_space_kinds() or {}
     eds = _state["editors"]
-    gone = [eds.pop(k) for k in [k for k in eds if k not in live]]
+    stale = [k for k, e in eds.items() if k not in live
+             or (k in kinds and kinds[k] != e.get("kind"))]
+    gone = [eds.pop(k) for k in stale]
     if gone:
         _editors_gone(gone)
 
@@ -2439,6 +2479,9 @@ def _timer():
                     rebuild_queue(tree, kind, props, force=False, path=path)
         finally:
             _state["src_hint"] = saved_hint
+    # Every tick, before rendering: an editor switched away from previews
+    # must not get one more render before its area redraws.
+    _prune_editors()
     _drop_disallowed(props)
     rendered = process_queue(props)
     _state["prune_in"] -= 1
@@ -3133,7 +3176,9 @@ TR = {
                 ("line", "Geometry Nodes:  a small shaded (clay) 3D render"),
                 ("line", "        of the geometry."),
                 ("line", "        Texture / Math Nodes (checkbox): also show a"),
-                ("line", "        flat swatch for texture / math / colour nodes."),
+                ("line", "        flat swatch for texture / math / colour nodes"),
+                ("line", "        (the node alone: fields linked into it are not"),
+                ("line", "        evaluated, its own input values stand in)."),
                 ("line", "        A tree on several objects previews the active one."),
                 ("line", "        Nodes inside a Repeat / Simulation / For Each"),
                 ("line", "        zone get no preview (they can't be wired out)."),
@@ -3282,7 +3327,8 @@ TR = {
                 ("line", "幾何節點：幾何輸出以有明暗的灰色（clay）小張"),
                 ("line", "        3D 算圖顯示。"),
                 ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
-                ("line", "        數學 / 顏色節點顯示為平面色板。"),
+                ("line", "        數學 / 顏色節點顯示為平面色板（只算該節點本身："),
+                ("line", "        接進來的 field 不會計算，以它自己的輸入值代替）。"),
                 ("line", "        多個物件共用同一棵樹時，以作用中物件為準。"),
                 ("line", "        Repeat / Simulation / For Each zone 內的節點"),
                 ("line", "        不顯示預覽（無法從 zone 內接出）。"),

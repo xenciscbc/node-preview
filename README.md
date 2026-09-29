@@ -14,7 +14,9 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 - **World** — environment swatches; a **volume** node (fog) is shown on a lit
   sphere instead (a global world volume renders black as a plain 360°).
 - **Geometry Nodes** — a small shaded (clay) **3D render of the geometry** at
-  each node; texture / math / colour nodes can show a flat swatch.
+  each node; texture / math / colour nodes can show a flat swatch of the node
+  alone (fields linked into it are not evaluated; its own input values stand
+  in, so upstream edits don't re-render it).
 - **Compositor** — each node's **image result** (renders the scene through the
   compositor per node). Previews render on a temporary copy of the scene, so
   your Viewer node and Render Result keep their full resolution. They follow
