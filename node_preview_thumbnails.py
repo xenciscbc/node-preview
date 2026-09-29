@@ -1951,10 +1951,14 @@ def _data_sig(data, obj=None):
     ck = (ref, bool(obj is not None and len(getattr(obj, "vertex_groups", ()))))
     gen = _state["data_gen"].get(ref, 0)
     hit = _state["data_sigs"].get(ck)
-    if hit is not None and obj is not None and obj.mode == "WEIGHT_PAINT":
-        # Every brush dab updates the mesh; hashing the weights each time
-        # would stall painting. The count stays ahead: leaving the mode
-        # updates the object and the next rebuild fingerprints once.
+    if hit is not None and (getattr(data, "is_editmode", False) or (
+            obj is not None and obj.mode == "WEIGHT_PAINT")):
+        # Edit Mode: the mesh keeps its pre-edit data until you leave, so a
+        # fingerprint now would only re-render the same stale image.
+        # Weight Paint: every brush dab updates the mesh; hashing the weights
+        # each time would stall painting. Either way the update count stays
+        # ahead: leaving the mode updates the object and the next rebuild
+        # fingerprints once.
         return hit[1]
     if hit is None or hit[0] != gen:
         hit = (gen, _compute_data_sig(data, obj))
@@ -2003,8 +2007,10 @@ def _rebuild_queue(tree, kind, props, force, path):
         esig += "|f%d" % bpy.context.scene.frame_current
     if chain:
         esig += "|" + _context_sig(src, path, chain)
-    if kind == KIND_GEO:
-        esig += "|" + _geo_source_sig(src[1], root)
+    # The object / modifier side of a GN preview only matters to 3D renders of
+    # geometry: field swatches (Noise, Math ...) render the node in isolation,
+    # so a mesh edit or modifier input change doesn't re-render them.
+    gsig = "|" + _geo_source_sig(src[1], root) if kind == KIND_GEO else ""
     lsig = _light_sig(props)
     memo = {}
     live = set()
@@ -2017,6 +2023,8 @@ def _rebuild_queue(tree, kind, props, force, path):
             continue
         if kind == KIND_SHADER and renders_as_shader(node):
             extra = esig + "|" + lsig
+        elif gsig and any(s.type == "GEOMETRY" for s in node.outputs):
+            extra = esig + gsig
         else:
             extra = esig
         h = hashlib.md5((h + extra).encode("utf-8", "replace")).hexdigest()
@@ -2345,7 +2353,10 @@ def _timer():
     _drop_disallowed(props)
     rendered = process_queue(props)
     _state["prune_in"] -= 1
-    if _state["prune_in"] <= 0:
+    # Prune on the ~3 s cadence, and right away once new renders push the
+    # cache over its limit (switching quickly between objects would overshoot
+    # it for seconds otherwise).
+    if _state["prune_in"] <= 0 or (rendered and len(_state["textures"]) > _max_textures()):
         _state["prune_in"] = 20          # ~every 3 s
         _prune_cache()
     # Redraw after new renders, and after thumbnails were dropped (filtered
@@ -2855,6 +2866,13 @@ def _mark_dirty(self, context):
     _state["dirty"] = True
 
 
+def _toggle_auto_update(self, context):
+    # Turned back on: catch up on whatever changed while it was off.
+    if self.auto_update:
+        _state["dirty"] = True
+        _ensure_timer()
+
+
 def _redraw(self, context):
     _tag_node_editors()
 
@@ -3199,7 +3217,8 @@ class NPVProps(bpy.types.PropertyGroup):
                ("ZH", "中文", "Chinese")],
         default="AUTO")
     enabled: bpy.props.BoolProperty(name="Show Previews", default=True, update=_toggle_enabled)
-    auto_update: bpy.props.BoolProperty(name="Auto Update", default=True)
+    auto_update: bpy.props.BoolProperty(
+        name="Auto Update", default=True, update=_toggle_auto_update)
     only_tex_shader: bpy.props.BoolProperty(
         name="Only Texture / Shader Nodes", default=True, update=_mark_dirty)
     preview_scope: bpy.props.EnumProperty(
