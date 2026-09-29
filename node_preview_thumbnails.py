@@ -18,12 +18,12 @@ Geometry Nodes:
     evaluated; socket defaults stand in).
 Compositor:
   - Every node with an image output -> a flat swatch of that node's result.
-    (Heavier: each preview renders the scene through the compositor, so it is
-    manual-refresh only.)
+    (Heavier: each preview renders the scene through the compositor.)
+Lights:
+  - A light's node tree (Cycles) previews like a material.
 
-Engine: EEVEE or Cycles (per preview). Updates: automatic for Shader / Geometry
-(only the changed nodes re-render), plus a manual Refresh button; Compositor is
-manual only.
+Engine: EEVEE or Cycles (per preview). Updates: automatic (only the changed
+nodes re-render, visible / active nodes first), plus a manual Refresh button.
 
 Tested on Blender 5.2 (EEVEE + Cycles, Vulkan). Legacy add-on: install via
 Preferences > Add-ons > (v) Install from Disk...
@@ -33,7 +33,7 @@ Preferences > Add-ons > (v) Install from Disk...
 bl_info = {
     "name": "Node Preview Thumbnails",
     "author": "Chun (built with Claude)",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (5, 2, 0),
     "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
     "description": "Live rendered thumbnail above nodes (shader/world/geometry/compositor).",
@@ -42,6 +42,8 @@ bl_info = {
 }
 
 import os
+import time
+import shutil
 import hashlib
 
 import bpy
@@ -50,6 +52,7 @@ from bpy.app.handlers import persistent
 import gpu
 import blf
 from mathutils import Vector
+import numpy as np
 from gpu.types import GPUTexture, Buffer
 from gpu_extras.batch import batch_for_shader
 
@@ -73,6 +76,8 @@ def space_kind(space):
 PREVIEW_SCENE = "NPV_preview_scene"
 PREVIEW_PLANE = "NPV_preview_plane"
 PREVIEW_SPHERE = "NPV_preview_sphere"
+PREVIEW_CUBE = "NPV_preview_cube"
+ENV_IMAGE_PREFIX = "NPV_env_"
 PREVIEW_CAM = "NPV_preview_cam"
 PREVIEW_SUN = "NPV_preview_sun"
 PREVIEW_MAT_TMP = "NPV_preview_tmp_mat"
@@ -106,6 +111,13 @@ _state = {
     "img_gen": {},        # image name -> update counter (texture paint)
     "tex_tick": {},       # texture key -> last-used tick (cache eviction)
     "tick": 0, "prune_in": 0,
+    "failed": {},         # texture key -> hash whose render failed (no retry)
+    "values": {},         # texture key -> number shown on a uniform Value swatch
+    "last_value": None,   # set by the loader for the render in progress
+    "visible": set(),     # keys of nodes on screen (rendered first)
+    "priority": set(),    # keys of the active / selected nodes (rendered first)
+    "src_hint": [],       # (kind, name) of the data-blocks the editor shows
+    "export_to": None,    # file path: the next render is copied there instead
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 
@@ -426,8 +438,71 @@ def _drop_if_no_uv(obj):
     return None
 
 
+_env_enum_cache = []
+
+
+def _env_dir():
+    try:
+        return bpy.utils.system_resource("DATAFILES", path="studiolights/world") or ""
+    except Exception:
+        return ""
+
+
+def _env_items(self, context):
+    """'Uniform' plus Blender's bundled studio-light HDRIs."""
+    items = [("UNIFORM", "Uniform", "Even white environment (World Light sets "
+              "its strength)", 0)]
+    d = _env_dir()
+    try:
+        files = sorted(f for f in os.listdir(d)
+                       if f.lower().endswith((".exr", ".hdr")))
+    except OSError:
+        files = []
+    for i, f in enumerate(files):
+        label = os.path.splitext(f)[0].replace("_", " ").title()
+        items.append((f, label, "Light the preview with Blender's '%s' HDRI" % label,
+                      i + 1))
+    _env_enum_cache[:] = items
+    return items
+
+
+def _env_image(filename):
+    """The bundled HDRI ``filename`` as an image (loaded once), or None."""
+    name = ENV_IMAGE_PREFIX + filename
+    img = bpy.data.images.get(name)
+    if img is not None:
+        return img
+    path = os.path.join(_env_dir(), filename)
+    if not os.path.isfile(path):
+        return None
+    try:
+        img = bpy.data.images.load(path, check_existing=False)
+    except RuntimeError:
+        return None
+    img.name = name
+    return img
+
+
+def _setup_env(wnt, bg, env, world_strength):
+    """Feed the preview world's Background from a bundled HDRI, or white."""
+    tex = wnt.nodes.get("NPV_env")
+    img = _env_image(env) if env and env != "UNIFORM" else None
+    if img is None:
+        if tex is not None:
+            wnt.nodes.remove(tex)
+        bg.inputs[0].default_value = (1, 1, 1, 1)
+    else:
+        if tex is None:
+            tex = wnt.nodes.new("ShaderNodeTexEnvironment")
+            tex.name = "NPV_env"
+        tex.image = img
+        if not bg.inputs[0].is_linked:
+            wnt.links.new(tex.outputs["Color"], bg.inputs[0])
+    bg.inputs[1].default_value = world_strength
+
+
 def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
-                         engine="BLENDER_EEVEE"):
+                         engine="BLENDER_EEVEE", env="UNIFORM"):
     scn = bpy.data.scenes.get(PREVIEW_SCENE)
     if scn is None:
         scn = bpy.data.scenes.new(PREVIEW_SCENE)
@@ -455,6 +530,7 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     r.use_sequencer = False
     r.image_settings.file_format = "PNG"
     r.image_settings.color_mode = "RGBA"
+    r.image_settings.color_depth = "8"
     try:
         scn.view_settings.view_transform = "Standard"
         scn.display_settings.display_device = "sRGB"
@@ -470,8 +546,7 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
         wout = next((n for n in wnt.nodes if n.bl_idname == "ShaderNodeOutputWorld"), None) \
             or wnt.nodes.new("ShaderNodeOutputWorld")
         wnt.links.new(bg.outputs[0], wout.inputs["Surface"])
-    bg.inputs[0].default_value = (1, 1, 1, 1)
-    bg.inputs[1].default_value = world_strength
+    _setup_env(wnt, bg, env, world_strength)
 
     plane = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_PLANE))
     if plane is None:
@@ -494,6 +569,19 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     if sphere.name not in scn.collection.objects:
         scn.collection.objects.link(sphere)
     sphere.location = (0, 0, 0)
+
+    cube = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_CUBE))
+    if cube is None:
+        me = _new_uv_mesh(PREVIEW_CUBE + "_mesh", lambda bm: bmesh.ops.create_cube(
+            bm, size=1.0, calc_uvs=True))
+        cube = bpy.data.objects.new(PREVIEW_CUBE, me)
+    if cube.name not in scn.collection.objects:
+        scn.collection.objects.link(cube)
+    cube.location = (0, 0, 0)
+    # Tilted so three faces show (a cube seen face-on reads as a square).
+    cube.rotation_euler = (0.6155, 0.0, 0.7854)
+    cube.scale = (0.98, 0.98, 0.98)
+    cube.hide_render = True      # only render_shader's Cube shape shows it
 
     cam = bpy.data.objects.get(PREVIEW_CAM)
     if cam is None:
@@ -519,20 +607,70 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
     return scn, plane, sphere
 
 
-def _png_to_texture(path):
+def _linear_to_srgb(v):
+    v = np.clip(v, 0.0, 1.0)
+    return np.where(v <= 0.0031308, v * 12.92,
+                    1.055 * np.power(v, 1.0 / 2.4) - 0.055)
+
+
+def _load_render(path):
+    """Read a preview render back: (width, height, float32 RGBA pixels ready
+    to display, number or None). ``foreach_get`` into a numpy array is far
+    faster than ``img.pixels[:]`` (a Python list of w*h*4 floats).
+
+    A '.exr' render is a Value swatch encoded by _value_emission(): scene-
+    linear R = max(v, 0), G = max(-v, 0). It is shown as the grey the PNG path
+    would give (Standard view = sRGB, clipped) and, when every pixel holds the
+    same number, that number is returned for drawing on the thumbnail."""
     img = bpy.data.images.load(path, check_existing=False)
     try:
         w, h = img.size
         if w == 0 or h == 0:
             return None
-        buf = Buffer("FLOAT", w * h * 4, img.pixels[:])
-        return GPUTexture((w, h), format="RGBA16F", data=buf)
+        px = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(px)
     finally:
         bpy.data.images.remove(img)
+    value = None
+    if path.lower().endswith(".exr"):
+        px = px.reshape(-1, 4)
+        a = px[:, 3]
+        solid = a > 0.5
+        r = np.where(a > 1e-6, px[:, 0] / np.maximum(a, 1e-6), 0.0)
+        g = np.where(a > 1e-6, px[:, 1] / np.maximum(a, 1e-6), 0.0)
+        if solid.any():
+            v = (r - g)[solid]
+            lo, hi = float(v.min()), float(v.max())
+            if hi - lo <= 1e-3 * max(1.0, abs(hi), abs(lo)):
+                value = float(v.mean())
+        grey = _linear_to_srgb(r).astype(np.float32)
+        px = np.stack([grey, grey, grey, a], axis=1).reshape(-1)
+    return w, h, np.ascontiguousarray(px, dtype=np.float32), value
+
+
+def _png_to_texture(path):
+    got = _load_render(path)
+    if got is None:
+        return None
+    w, h, px, value = got
+    _state["last_value"] = value
+    buf = Buffer("FLOAT", w * h * 4, px)
+    return GPUTexture((w, h), format="RGBA16F", data=buf)
+
+
+def _finish(path):
+    """Hand a finished render on: to the thumbnail cache, or -- while the
+    Export operator runs -- copied to the chosen file."""
+    dst = _state.get("export_to")
+    if dst:
+        shutil.copyfile(path, dst)
+        return True
+    return _png_to_texture(path)
 
 
 def _render_scene(scn):
-    path = os.path.join(bpy.app.tempdir, "npv_render.png")
+    ext = ".exr" if scn.render.image_settings.file_format == "OPEN_EXR" else ".png"
+    path = os.path.join(bpy.app.tempdir, "npv_render" + ext)
     scn.render.filepath = path
     # Override only the scene: adding a window makes render report FINISHED
     # without writing the file.
@@ -619,7 +757,7 @@ def _route_out(top_tree, chain, node_name, pick):
     if sock is None:
         return node, None, copies
     for g, inst in zip(reversed(copies), reversed(insts)):
-        stype = {"SHADER": "NodeSocketShader",
+        stype = {"SHADER": "NodeSocketShader", "VALUE": "NodeSocketFloat",
                  "GEOMETRY": "NodeSocketGeometry"}.get(sock.type, "NodeSocketColor")
         item = g.interface.new_socket("NPV Preview", in_out="OUTPUT", socket_type=stype)
         outs = [n for n in g.nodes if n.bl_idname == "NodeGroupOutput"]
@@ -642,11 +780,84 @@ def _remove_groups(groups):
             pass
 
 
+def _want_value(props):
+    """Render Value swatches to EXR so the number can be read back (not while
+    exporting: the export is a PNG)."""
+    return getattr(props, "show_values", True) and not _state.get("export_to")
+
+
+def _value_emission(nt, osock, surf):
+    """Wire a Value socket to ``surf`` through an Emission whose colour
+    encodes the number losslessly for an EXR render: R = max(v, 0),
+    G = max(-v, 0) (a negative emission would be clamped to black)."""
+    def math(op, a, b):
+        m = nt.nodes.new("ShaderNodeMath")
+        m.operation = op
+        m.use_clamp = False
+        nt.links.new(a, m.inputs[0])
+        m.inputs[1].default_value = b
+        return m.outputs[0]
+    pos = math("MAXIMUM", osock, 0.0)
+    neg = math("MAXIMUM", math("MULTIPLY", osock, -1.0), 0.0)
+    comb = nt.nodes.new("ShaderNodeCombineColor")
+    comb.mode = "RGB"
+    nt.links.new(pos, comb.inputs[0])
+    nt.links.new(neg, comb.inputs[1])
+    comb.inputs[2].default_value = 0.0
+    emit = nt.nodes.new("ShaderNodeEmission")
+    nt.links.new(comb.outputs[0], emit.inputs["Color"])
+    nt.links.new(emit.outputs[0], surf)
+
+
+def _use_exr(scn):
+    r = scn.render.image_settings
+    r.file_format = "OPEN_EXR"
+    r.color_depth = "32"
+    r.color_mode = "RGBA"
+
+
+def _material_from_tree(src_tree):
+    """A throwaway material rebuilt from a non-material shader tree (a light's
+    node tree): same node names and links; the Light Output becomes a
+    Material Output so the tree renders on the preview objects."""
+    m = bpy.data.materials.new(PREVIEW_MAT_TMP)
+    nt = m.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    made = {}
+    for sn in src_tree.nodes:
+        if sn.bl_idname == "ShaderNodeOutputLight":
+            dn = nt.nodes.new("ShaderNodeOutputMaterial")
+        else:
+            try:
+                dn = _clone_shader_node(nt, sn)
+            except RuntimeError:
+                continue
+        dn.name = sn.name
+        made[sn.name] = dn
+    for l in src_tree.links:
+        a, b = made.get(l.from_node.name), made.get(l.to_node.name)
+        if a is None or b is None:
+            continue
+        fs = next((o for o in a.outputs if o.identifier == l.from_socket.identifier), None)
+        ts = next((i for i in b.inputs if i.identifier == l.to_socket.identifier), None)
+        if fs is not None and ts is not None:
+            nt.links.new(fs, ts)
+    return m
+
+
 def render_shader(src_mat, node_name, res, props, out_id=None, chain=None):
+    """``src_mat`` is a Material, or a Light whose node tree is previewed."""
     scn, plane, sphere = ensure_preview_scene(
-        res, props.world_strength, props.sun_strength, _engine_id(props))
-    prev = src_mat.copy()
-    prev.name = PREVIEW_MAT_TMP
+        res, props.world_strength, props.sun_strength, _engine_id(props),
+        getattr(props, "preview_env", "UNIFORM"))
+    if isinstance(src_mat, bpy.types.Light):
+        if src_mat.node_tree is None:
+            return None
+        prev = _material_from_tree(src_mat.node_tree)
+    else:
+        prev = src_mat.copy()
+        prev.name = PREVIEW_MAT_TMP
     copies = []
     try:
         nt = prev.node_tree
@@ -673,24 +884,34 @@ def render_shader(src_mat, node_name, res, props, out_id=None, chain=None):
                 return None
             if osock.type == "SHADER":
                 nt.links.new(osock, surf)
+            elif osock.type == "VALUE" and _want_value(props):
+                _value_emission(nt, osock, surf)
+                _use_exr(scn)
             else:
                 emit = nt.nodes.new("ShaderNodeEmission")
                 nt.links.new(osock, emit.inputs["Color"])
                 nt.links.new(emit.outputs[0], surf)
-        if is_shader and props.shader_shape == "SPHERE":
-            obj, other = sphere, plane
-        else:
-            obj, other = plane, sphere
-        other.hide_render = True
-        obj.hide_render = False
+        cube = bpy.data.objects.get(PREVIEW_CUBE)
+        shape = props.shader_shape if is_shader else "PLANE"
+        obj = {"SPHERE": sphere, "CUBE": cube}.get(shape) or plane
+        for o in (plane, sphere, cube):
+            if o is not None:
+                o.hide_render = o is not obj
         obj.data.materials.clear()
         obj.data.materials.append(prev)
-        return _png_to_texture(_render_scene(scn))
+        return _finish(_render_scene(scn))
     finally:
         try:
             bpy.data.materials.remove(prev)
         except Exception:
             pass
+        cube = bpy.data.objects.get(PREVIEW_CUBE)
+        if cube is not None:
+            cube.hide_render = True
+            try:
+                cube.data.materials.clear()
+            except Exception:
+                pass
         _remove_groups(copies)
 
 
@@ -799,7 +1020,7 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=No
                 slot.material = mat
         obj2.hide_render = False
         _frame_object(scn, scn.camera, obj2)
-        return _png_to_texture(_render_scene(scn))
+        return _finish(_render_scene(scn))
     finally:
         try:
             if obj2.name in scn.collection.objects:
@@ -861,7 +1082,8 @@ def _clone_shader_node(dst_tree, src):
             dm.update()
         except Exception:
             pass
-    for si, di in zip(src.inputs, dst.inputs):
+    # Outputs too: RGB / Value nodes keep their value on the output socket.
+    for si, di in list(zip(src.inputs, dst.inputs)) + list(zip(src.outputs, dst.outputs)):
         if hasattr(si, "default_value") and hasattr(di, "default_value"):
             try:
                 di.default_value = si.default_value
@@ -900,6 +1122,9 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
             nt.links.new(tc.outputs["Generated"], vin)
         if osock.type == "SHADER":
             nt.links.new(osock, out.inputs["Surface"])
+        elif osock.type == "VALUE" and _want_value(props):
+            _value_emission(nt, osock, out.inputs["Surface"])
+            _use_exr(scn)
         else:
             emit = nt.nodes.new("ShaderNodeEmission")
             nt.links.new(osock, emit.inputs["Color"])
@@ -908,7 +1133,7 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
         plane.hide_render = False
         plane.data.materials.clear()
         plane.data.materials.append(m)
-        return _png_to_texture(_render_scene(scn))
+        return _finish(_render_scene(scn))
     finally:
         try:
             bpy.data.materials.remove(m)
@@ -1001,6 +1226,11 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
             pass
         r.use_compositing = True
         r.film_transparent = True
+        # The copy inherits the user's output format (JPEG, EXR, ...); the
+        # loader needs an 8-bit RGBA PNG.
+        r.image_settings.file_format = "PNG"
+        r.image_settings.color_mode = "RGBA"
+        r.image_settings.color_depth = "8"
         # The copy inherits the user's final-render quality (e.g. 4096 Cycles
         # samples); every compositor node renders the scene once, on the UI
         # thread, so keep each preview render cheap.
@@ -1012,7 +1242,7 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
                 tmp.eevee.taa_render_samples = min(tmp.eevee.taa_render_samples, 16)
         except Exception:
             pass
-        return _png_to_texture(_render_scene(tmp))
+        return _finish(_render_scene(tmp))
     finally:
         try:
             bpy.data.scenes.remove(tmp)
@@ -1129,7 +1359,7 @@ def render_world(world, node_name, res, props, out_id=None, chain=None):
                 cd.type = "PERSP"
                 cd.lens = 12.0
                 cam.rotation_euler = (1.3, 0.0, 0.0)
-        return _png_to_texture(_render_scene(scn))
+        return _finish(_render_scene(scn))
     finally:
         scn.world = saved_world
         cd.type, cd.lens, cam.location, cam.rotation_euler, \
@@ -1167,15 +1397,41 @@ def find_material_for_tree(tree):
     return None
 
 
+def _hinted(cls, collection):
+    """Data-blocks of ``cls`` the editor was last seen showing (its id /
+    id_from and the active object), most specific first."""
+    out = []
+    for c, name in _state.get("src_hint") or ():
+        if c == cls:
+            d = collection.get(name)
+            if d is not None and d not in out:
+                out.append(d)
+    return out
+
+
+def _uses_geo_tree(obj, tree):
+    return any(mo.type == 'NODES' and mo.node_group == tree for mo in obj.modifiers)
+
+
 def resolve_source(tree, kind):
+    """The data-block a tree is previewed through. Several can share a tree
+    (a material on many objects is fine; a GN tree on several objects is
+    not): prefer the one the editor shows, then fall back to the first."""
     if kind == KIND_SHADER:
+        for m in _hinted("MAT", bpy.data.materials):
+            if m.node_tree is not None and m.node_tree == tree:
+                return ("MAT", m.name)
         m = find_material_for_tree(tree)
-        return ("MAT", m.name) if m else None
+        if m:
+            return ("MAT", m.name)
+        for lt in _hinted("LIGHT", bpy.data.lights) + list(bpy.data.lights):
+            if getattr(lt, "node_tree", None) is not None and lt.node_tree == tree:
+                return ("LIGHT", lt.name)
+        return None
     if kind == KIND_GEO:
-        for obj in bpy.data.objects:
-            for mo in obj.modifiers:
-                if mo.type == 'NODES' and mo.node_group == tree:
-                    return ("OBJ", obj.name)
+        for obj in _hinted("OBJ", bpy.data.objects) + list(bpy.data.objects):
+            if _uses_geo_tree(obj, tree):
+                return ("OBJ", obj.name)
         return None
     if kind == KIND_COMP:
         for s in bpy.data.scenes:
@@ -1198,6 +1454,10 @@ def _tree_by_pointer(ptr):
     for w in bpy.data.worlds:
         if w.node_tree is not None and w.node_tree.as_pointer() == ptr:
             return w.node_tree
+    for lt in bpy.data.lights:
+        nt = getattr(lt, "node_tree", None)
+        if nt is not None and nt.as_pointer() == ptr:
+            return nt
     for ng in bpy.data.node_groups:
         if ng.as_pointer() == ptr:
             return ng
@@ -1237,12 +1497,19 @@ def _get_props():
 
 
 def _light_sig(props):
-    return "%s|%.4f|%.4f" % (props.shader_shape, props.world_strength, props.sun_strength)
+    return "%s|%.4f|%.4f|%s" % (props.shader_shape, props.world_strength,
+                                props.sun_strength,
+                                getattr(props, "preview_env", "UNIFORM"))
 
 
 def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
              chain=None):
     if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
+        return
+    # A render that failed is not retried until something it depends on
+    # changes (or Refresh forces it): otherwise every edit anywhere in the
+    # tree would re-run it -- a whole scene render for a compositor node.
+    if not force and _state["failed"].get(key) == h:
         return
     if key in _state["queued_keys"]:
         for it in _state["queue"]:
@@ -1250,7 +1517,8 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
                 it["hash"] = h
                 break
         return
-    _state["queue"].append({"kind": kind, "src": src[1], "tree": tree.name,
+    _state["queue"].append({"kind": kind, "src": src[1], "src_type": src[0],
+                            "tree": tree.name,
                             "root": (root or tree).name,
                             "chain": list(chain or ()),
                             "node": node_name, "out": out_id, "key": key,
@@ -1276,8 +1544,13 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
     src = resolve_source(root, kind)
     if src is None:
         return
-    # Resolution is part of the signature so a Quality change re-renders.
-    esig = _engine_id(props) + "|" + props.resolution
+    # Resolution is part of the signature so a Quality change re-renders;
+    # the source too (a GN tree shared by several objects previews the one
+    # the editor shows).
+    esig = "%s|%s|%s|%d" % (_engine_id(props), props.resolution, src,
+                            int(getattr(props, "show_values", True)))
+    if getattr(props, "update_on_frame", False):
+        esig += "|f%d" % bpy.context.scene.frame_current
     if chain:
         esig += "|" + _context_sig(src, path, chain)
     lsig = _light_sig(props)
@@ -1303,7 +1576,8 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
     # Thumbnails of this tree that are no longer shown (node deleted or
     # renamed, output switched, filtered out) only hold GPU memory.
     prefix = "%d:" % tree.as_pointer()
-    for key in [k for k in _state["textures"] if k.startswith(prefix) and k not in live]:
+    for key in [k for k in set(_state["textures"]) | set(_state["failed"])
+                if k.startswith(prefix) and k not in live]:
         _drop_texture(key)
 
 
@@ -1316,6 +1590,18 @@ def _drop_texture(key):
     _state["textures"].pop(key, None)
     _state["hashes"].pop(key, None)
     _state["tex_tick"].pop(key, None)
+    _state["failed"].pop(key, None)
+    _state["values"].pop(key, None)
+
+
+def _reset_cache():
+    """Forget every thumbnail, pending render and failure."""
+    for k in ("textures", "tex_tick", "img_gen", "hashes", "failed", "values"):
+        _state[k].clear()
+    _state["queue"].clear()
+    _state["queued_keys"].clear()
+    _state["visible"] = set()
+    _state["priority"] = set()
 
 
 def _live_tree_pointers():
@@ -1326,6 +1612,9 @@ def _live_tree_pointers():
     for w in bpy.data.worlds:
         if w.node_tree is not None:
             ptrs.add(w.node_tree.as_pointer())
+    for lt in bpy.data.lights:
+        if getattr(lt, "node_tree", None) is not None:
+            ptrs.add(lt.node_tree.as_pointer())
     for ng in bpy.data.node_groups:
         ptrs.add(ng.as_pointer())
     return ptrs
@@ -1344,7 +1633,7 @@ def _prune_cache():
     """Drop thumbnails whose node tree no longer exists, then evict the least
     recently used ones above the cache limit."""
     live = _live_tree_pointers()
-    for key in list(_state["textures"]):
+    for key in set(_state["textures"]) | set(_state["failed"]):
         try:
             ptr = int(key.split(":", 1)[0])
         except ValueError:
@@ -1366,53 +1655,92 @@ def _prune_cache():
             _drop_texture(key)
 
 
+def _pop_next():
+    """Next queue item: the active / selected nodes first, then the ones on
+    screen, then the rest (each group in queue order)."""
+    q = _state["queue"]
+    pri, vis = _state["priority"], _state["visible"]
+    best, best_rank = 0, 3
+    for i, it in enumerate(q):
+        k = it.get("key")
+        rank = 0 if k in pri else 1 if k in vis else 2
+        if rank < best_rank:
+            best, best_rank = i, rank
+            if rank == 0:
+                break
+    it = q.pop(best)
+    _state["queued_keys"].discard(it.get("key"))
+    return it
+
+
+def _render_item(item, res, props):
+    """Render one queue item; returns what _finish() returned, or None."""
+    k = item["kind"]
+    oid = item.get("out")
+    chain = item.get("chain") or None
+    if k == KIND_SHADER:
+        if item.get("src_type") == "LIGHT":
+            m = bpy.data.lights.get(item["src"])
+        else:
+            m = bpy.data.materials.get(item["src"])
+        return render_shader(m, item["node"], res, props, oid, chain) if m else None
+    if k == KIND_WORLD:
+        w = bpy.data.worlds.get(item["src"])
+        return render_world(w, item["node"], res, props, oid, chain) if w else None
+    if k == KIND_GEO:
+        o = bpy.data.objects.get(item["src"])
+        t = bpy.data.node_groups.get(item.get("tree") or "")
+        r = bpy.data.node_groups.get(item.get("root") or "") or t
+        return render_geo(o, item["node"], res, props, oid, t, chain, r) \
+            if o and t else None
+    if k == KIND_COMP:
+        s = bpy.data.scenes.get(item["src"])
+        return render_compositor(s, item["node"], res, props, oid, chain) if s else None
+    return None
+
+
 def process_queue(props):
+    """Render queued previews: at most 'Nodes / Tick', and stop early once the
+    'Time Budget' is spent (at least one render per call), so a slow engine
+    or a high Quality doesn't freeze the UI for several renders in a row."""
     if not _state["queue"]:
         return False
     n = max(1, int(props.batch_size))
+    budget = max(0.0, float(getattr(props, "time_budget", 0))) / 1000.0
     res = int(props.resolution)
     did = False
+    start = time.perf_counter()
     _state["rendering"] = True
     try:
-        for _ in range(n):
+        for i in range(n):
             if not _state["queue"]:
                 break
-            item = _state["queue"].pop(0)
-            _state["queued_keys"].discard(item["key"])
-            k = item["kind"]
-            oid = item.get("out")
+            if i and budget and time.perf_counter() - start >= budget:
+                break
+            item = _pop_next()
+            _state["last_value"] = None
             try:
-                chain = item.get("chain") or None
-                if k == KIND_SHADER:
-                    m = bpy.data.materials.get(item["src"])
-                    tex = render_shader(m, item["node"], res, props, oid, chain) \
-                        if m else None
-                elif k == KIND_WORLD:
-                    w = bpy.data.worlds.get(item["src"])
-                    tex = render_world(w, item["node"], res, props, oid, chain) \
-                        if w else None
-                elif k == KIND_GEO:
-                    o = bpy.data.objects.get(item["src"])
-                    t = bpy.data.node_groups.get(item.get("tree") or "")
-                    r = bpy.data.node_groups.get(item.get("root") or "") or t
-                    tex = render_geo(o, item["node"], res, props, oid, t, chain, r) \
-                        if o and t else None
-                elif k == KIND_COMP:
-                    s = bpy.data.scenes.get(item["src"])
-                    tex = render_compositor(s, item["node"], res, props, oid, chain) \
-                        if s else None
-                else:
-                    tex = None
+                tex = _render_item(item, res, props)
             except Exception as exc:
                 print("[NodePreview] render failed for %s: %r" % (item["node"], exc))
                 tex = None
+            key = item["key"]
             if tex is not None:
-                _state["textures"][item["key"]] = tex
-                _state["hashes"][item["key"]] = item["hash"]
-                _touch(item["key"])
-                did = True
+                _state["textures"][key] = tex
+                _state["hashes"][key] = item["hash"]
+                _state["failed"].pop(key, None)
+                if _state["last_value"] is None:
+                    _state["values"].pop(key, None)
+                else:
+                    _state["values"][key] = _state["last_value"]
+                _touch(key)
+            else:
+                _state["failed"][key] = item["hash"]
+            # A failure changes what is drawn too (the error marker).
+            did = True
     finally:
         _state["rendering"] = False
+        _state["last_value"] = None
     return did
 
 
@@ -1426,11 +1754,24 @@ def _tag_node_editors():
 # --------------------------------------------------------------------------- #
 #  Timer / depsgraph
 # --------------------------------------------------------------------------- #
+def _animation_playing():
+    try:
+        return any(w.screen is not None and w.screen.is_animation_playing
+                   for w in bpy.context.window_manager.windows)
+    except Exception:
+        return False
+
+
 def _timer():
     props = _get_props()
     if props is None or not props.enabled:
         _state["timer_running"] = False
         return None
+    # Renders run on the UI thread and would stall playback; pending work
+    # (dirty flag, queue) simply waits until it stops -- unless the user
+    # asked for previews to follow the frame.
+    if not getattr(props, "update_on_frame", False) and _animation_playing():
+        return 0.25
     shown = len(_state["textures"])
     if _state["dirty"] and props.auto_update:
         _state["dirty"] = False
@@ -1473,9 +1814,27 @@ def _on_depsgraph(scene, depsgraph):
             name = upd.id.name
             _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
             _state["dirty"] = True
-        elif idt in {"MATERIAL", "NODETREE", "OBJECT", "WORLD", "SCENE"}:
+        elif idt == "OBJECT":
+            # Moving / rotating an object changes nothing a preview shows
+            # (geometry previews render a copy at the origin), and would
+            # otherwise re-hash the whole tree every tick during a drag.
+            if upd.is_updated_transform and not upd.is_updated_geometry \
+                    and not upd.is_updated_shading:
+                continue
+            _state["dirty"] = True
+        elif idt in {"MATERIAL", "NODETREE", "WORLD", "SCENE", "LIGHT"}:
             # SCENE: e.g. a render engine switch (part of the hash).
             _state["dirty"] = True
+
+
+@persistent
+def _on_frame_change(scene, depsgraph=None):
+    """With 'Update on Frame Change' the frame is part of every hash, so
+    time-dependent nodes (Scene Time, image sequences, ...) re-render."""
+    props = getattr(scene, "npv", None)
+    if props is not None and props.enabled and props.auto_update \
+            and getattr(props, "update_on_frame", False):
+        _state["dirty"] = True
 
 
 @persistent
@@ -1484,14 +1843,10 @@ def _on_load_post(_filepath):
     texture belongs to the old file. The preview timer itself is persistent
     and survives the load; _ensure_timer() here is just a safety net in case
     it is gone for any other reason."""
-    _state["textures"].clear()
-    _state["tex_tick"].clear()
-    _state["img_gen"].clear()
-    _state["hashes"].clear()
-    _state["queue"].clear()
-    _state["queued_keys"].clear()
+    _reset_cache()
     _socket_enum_cache.clear()
     _state["sel_sig"] = None
+    _state["src_hint"] = []
     _state["active_tree_ptr"] = None
     _state["active_kind"] = None
     _state["active_path"] = None
@@ -1532,17 +1887,30 @@ def _draw_tex(tex, x0, y0, x1, y1):
     batch.draw(sh)
 
 
-def _draw_rect(color, x0, y0, x1, y1):
-    sh = gpu.shader.from_builtin("UNIFORM_COLOR")
-    pos = ((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1))
+def _color_shader():
+    sh = _state.get("shader_color")
+    if sh is None:
+        sh = gpu.shader.from_builtin("UNIFORM_COLOR")
+        _state["shader_color"] = sh
+    return sh
+
+
+def _draw_tris(color, pos):
+    if not pos:
+        return
+    sh = _color_shader()
     batch = batch_for_shader(sh, "TRIS", {"pos": pos})
     sh.bind()
     sh.uniform_float("color", color)
     batch.draw(sh)
 
 
+def _draw_rect(color, x0, y0, x1, y1):
+    _draw_tris(color, ((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)))
+
+
 def _draw_border(color, x0, y0, x1, y1, width=1.0):
-    sh = gpu.shader.from_builtin("UNIFORM_COLOR")
+    sh = _color_shader()
     pos = ((x0, y0), (x1, y0), (x1, y0), (x1, y1),
            (x1, y1), (x0, y1), (x0, y1), (x0, y0))
     batch = batch_for_shader(sh, "LINES", {"pos": pos})
@@ -1553,6 +1921,26 @@ def _draw_border(color, x0, y0, x1, y1, width=1.0):
     gpu.state.line_width_set(1.0)
 
 
+def _checker_tris(x0, y0, x1, y1, size):
+    """Triangles of the light squares of a checkerboard filling the rect."""
+    pos = []
+    if size <= 0:
+        return pos
+    j, y = 0, y0
+    while y < y1:
+        ya = min(y + size, y1)
+        i, x = 0, x0
+        while x < x1:
+            xa = min(x + size, x1)
+            if (i + j) % 2 == 0:
+                pos += ((x, y), (xa, y), (xa, ya), (x, y), (xa, ya), (x, ya))
+            x += size
+            i += 1
+        y += size
+        j += 1
+    return pos
+
+
 def _blf_size(font, size):
     try:
         blf.size(font, size)
@@ -1560,26 +1948,86 @@ def _blf_size(font, size):
         blf.size(font, size, 72)
 
 
-def _draw_label(text, x, y, maxw, ps=1.0):
-    """Small socket name shown on a cell (side-by-side mode). Truncated with an
-    ellipsis to fit the cell width. ``ps`` is the UI pixel size so the font and
-    padding scale with HiDPI / UI resolution scale."""
-    font = 0
-    _blf_size(font, round(11 * ps))
-    limit = max(0.0, maxw - 6.0 * ps)
+def _fit_text(font, text, limit):
     if blf.dimensions(font, text)[0] > limit:
         while text and blf.dimensions(font, text + "…")[0] > limit:
             text = text[:-1]
         text = (text + "…") if text else ""
-    if not text:
-        return
+    return text
+
+
+def _draw_text(text, x, y, ps, size=11, color=(1.0, 1.0, 1.0, 1.0)):
+    font = 0
+    _blf_size(font, round(size * ps))
     blf.enable(font, blf.SHADOW)
     blf.shadow(font, 3, 0.0, 0.0, 0.0, 0.9)
     blf.shadow_offset(font, round(1 * ps), round(-1 * ps))
     blf.position(font, x, y, 0.0)
-    blf.color(font, 1.0, 1.0, 1.0, 1.0)
+    blf.color(font, *color)
     blf.draw(font, text)
     blf.disable(font, blf.SHADOW)
+
+
+def _draw_label(text, x, y, maxw, ps=1.0):
+    """Small socket name shown on a cell (side-by-side mode). Truncated with an
+    ellipsis to fit the cell width. ``ps`` is the UI pixel size so the font and
+    padding scale with HiDPI / UI resolution scale."""
+    _blf_size(0, round(11 * ps))
+    text = _fit_text(0, text, max(0.0, maxw - 6.0 * ps))
+    if text:
+        _draw_text(text, x, y, ps)
+
+
+def _draw_centered(text, cx0, cy0, cx1, cy1, ps, size=11, color=(1, 1, 1, 1)):
+    _blf_size(0, round(size * ps))
+    text = _fit_text(0, text, max(0.0, (cx1 - cx0) - 6.0 * ps))
+    if not text:
+        return
+    tw, th = blf.dimensions(0, text)
+    _draw_text(text, (cx0 + cx1 - tw) / 2.0, (cy0 + cy1 - th) / 2.0, ps, size, color)
+
+
+def format_value(v):
+    """Number drawn on a Value swatch: short, no '-0'."""
+    if abs(v) < 5e-7:
+        v = 0.0
+    txt = "%.4g" % v
+    return txt
+
+
+COL_QUEUED = (1.0, 0.62, 0.15, 1.0)   # stale: waiting to re-render
+COL_FAILED = (0.95, 0.2, 0.2, 1.0)    # the last render failed
+
+
+def _grid_origin(pos, x0, x1, y0, node_h, gw, gh, gap):
+    """Bottom-left corner of a preview grid of size gw x gh placed at
+    ``pos`` relative to a node whose region rect is x0..x1 wide, top y0."""
+    if pos == "BELOW":
+        return x0 + (x1 - x0 - gw) / 2.0, y0 - node_h - gap - gh
+    if pos == "LEFT":
+        return x0 - gap - gw, y0 - gh
+    if pos == "RIGHT":
+        return x1 + gap, y0 - gh
+    return x0 + (x1 - x0 - gw) / 2.0, y0 + gap        # ABOVE
+
+
+def _record_hint(ctx, space):
+    """Remember which material / light / object the editor shows so the
+    queue previews through it (see resolve_source)."""
+    hint = []
+    for d in (getattr(space, "id", None), getattr(space, "id_from", None),
+              getattr(ctx, "active_object", None)):
+        if isinstance(d, bpy.types.Material):
+            hint.append(("MAT", d.name))
+        elif isinstance(d, bpy.types.Light):
+            hint.append(("LIGHT", d.name))
+        elif isinstance(d, bpy.types.Object):
+            hint.append(("OBJ", d.name))
+            if isinstance(d.data, bpy.types.Light):
+                hint.append(("LIGHT", d.data.name))
+    if hint != _state.get("src_hint"):
+        _state["src_hint"] = hint
+        _state["dirty"] = True
 
 
 def draw_callback():
@@ -1613,6 +2061,7 @@ def draw_callback():
     _state["active_tree_ptr"] = ptr
     _state["active_kind"] = kind
     _state["active_path"] = path
+    _record_hint(ctx, space)
     _ensure_timer()
 
     # In 'Selected' scope, a selection change has no depsgraph update, so watch
@@ -1645,52 +2094,114 @@ def draw_callback():
                                    # scaled -- a hairline border looks right at
                                    # any Resolution Scale; scaling it reads as
                                    # too thick.
-    gpu.state.blend_set("ALPHA")
+    rw, rh = region.width, region.height
+    scale = max(0.1, float(getattr(props, "thumb_scale", 1.0)))
+    where = getattr(props, "thumb_position", "ABOVE")
+    status = getattr(props, "show_status", True)
+    checker = getattr(props, "checker_bg", False)
+    show_values = getattr(props, "show_values", True)
+    zoom = float(getattr(props, "zoom_factor", 2.5)) \
+        if getattr(props, "zoom_active", False) else 1.0
+    active = tree.nodes.active
+    textures, queued = _state["textures"], _state["queued_keys"]
+    failed, hashes, values = _state["failed"], _state["hashes"], _state["values"]
+    visible, priority = set(), set()
+    jobs = []
     for node in tree.nodes:
         if not node_eligible(node, kind, props):
             continue
-        cells = []
-        for oid in _preview_targets(node, kind, props):
-            k = _skey(tree, node.name, oid)
-            t = _state["textures"].get(k)
-            if t is not None:
-                _touch(k)
-                cells.append((oid, t))
-        if not cells:
-            continue
+        keys = [(oid, _skey(tree, node.name, oid))
+                for oid in _preview_targets(node, kind, props)]
+        if node.select or node == active:
+            priority.update(k for _o, k in keys)
         loc = node.location_absolute
         # Scale node-space coords by ui_scale BEFORE view_to_region (see note).
         x0, y0 = v2d.view_to_region(loc.x * ps, loc.y * ps, clip=False)
         x1, _ = v2d.view_to_region((loc.x + node.width) * ps, loc.y * ps,
                                    clip=False)
         w = x1 - x0
+        dims = node.dimensions
+        node_h = w * dims.y / dims.x if dims.x > 0 else 0.0
+        z = zoom if node == active else 1.0
+        gw = w * scale * z             # grid width (== node width at 1x)
+
+        def layout(n):
+            # Single big swatch for one preview, otherwise 2 per row and wrap
+            # to further rows (cell = half the grid width, stays legible).
+            cols = 1 if n == 1 else 2
+            cw = gw / cols
+            gh = ((n + cols - 1) // cols) * cw
+            gx0, gy0 = _grid_origin(where, x0, x1, y0, node_h, gw, gh, gap)
+            return cols, cw, gh, gx0, gy0
+
+        cols, cw, gh, gx0, gy0 = layout(len(keys))
+        # Cull: skip nodes whose node and preview rects are both off screen.
+        lo_x, hi_x = min(x0, gx0), max(x1, gx0 + gw)
+        lo_y, hi_y = min(y0 - node_h, gy0), max(y0, gy0 + gh)
+        if hi_x < 0 or lo_x > rw or hi_y < 0 or lo_y > rh:
+            continue
+        visible.update(k for _o, k in keys)
         if w < 10:
             continue
-        # Grid: single big swatch for one preview, otherwise 2 per row and wrap
-        # to further rows (cell = half node width, so cells stay legible).
+        cells = []
+        for oid, k in keys:
+            t = textures.get(k)
+            st = None
+            if status:
+                if k in failed and (t is None or failed[k] != hashes.get(k)):
+                    st = "FAILED"
+                elif k in queued:
+                    st = "QUEUED"
+            if t is not None:
+                _touch(k)
+            if t is not None or st is not None:
+                cells.append((oid, k, t, st))
+        if cells:
+            cols, cw, gh, gx0, gy0 = layout(len(cells))
+            jobs.append((node == active and z != 1.0, node, cells, cols,
+                         gx0, gy0, gw, gh, cw))
+    _state["visible"] = visible
+    _state["priority"] = priority
+
+    gpu.state.blend_set("ALPHA")
+    # The enlarged active node last, so it sits on top of its neighbours.
+    for _top, node, cells, cols, gx0, gy0, gw, gh, cw in sorted(
+            jobs, key=lambda j: j[0]):
         n = len(cells)
-        cols = 1 if n == 1 else 2
-        rows = (n + cols - 1) // cols
-        cw = w / cols
-        by0 = y0 + gap                 # bottom edge of the whole grid
-        gw = cols * cw                 # grid width (== node width)
-        gh = rows * cw                 # grid height
         # One dark backdrop + outer border for the whole grid.
-        _draw_rect((0.05, 0.05, 0.05, 0.85), x0 - pad, by0 - pad, x0 + gw + pad, by0 + gh + pad)
+        _draw_rect((0.05, 0.05, 0.05, 0.85), gx0 - pad, gy0 - pad, gx0 + gw + pad, gy0 + gh + pad)
         oname = {s.identifier: (s.name or s.identifier) for s in node.outputs}
-        for i, (oid, tex) in enumerate(cells):
+        for i, (oid, k, tex, st) in enumerate(cells):
             col = i % cols
             row_from_top = i // cols
-            cx0 = x0 + col * cw
+            cx0 = gx0 + col * cw
             cx1 = cx0 + cw
-            cy1 = by0 + gh - row_from_top * cw     # top of this cell
+            cy1 = gy0 + gh - row_from_top * cw     # top of this cell
             cy0 = cy1 - cw                         # bottom of this cell
-            _draw_tex(tex, cx0, cy0, cx1, cy1)
-            if n > 1:
+            if tex is not None:
+                if checker:
+                    _draw_rect((0.22, 0.22, 0.22, 1.0), cx0, cy0, cx1, cy1)
+                    _draw_tris((0.36, 0.36, 0.36, 1.0),
+                               _checker_tris(cx0, cy0, cx1, cy1, 8.0 * ps))
+                _draw_tex(tex, cx0, cy0, cx1, cy1)
+                v = values.get(k) if show_values else None
+                if v is not None and cw >= 28 * ps:
+                    _draw_centered(format_value(v), cx0, cy0, cx1, cy1, ps,
+                                   size=12 if cw >= 60 * ps else 10)
+            elif st == "QUEUED":
+                _draw_centered("…", cx0, cy0, cx1, cy1, ps, size=14,
+                               color=COL_QUEUED)
+            elif st == "FAILED":
+                _draw_centered("!", cx0, cy0, cx1, cy1, ps, size=16,
+                               color=COL_FAILED)
+            if st is not None:
+                _draw_border(COL_QUEUED if st == "QUEUED" else COL_FAILED,
+                             cx0 + 0.5, cy0 + 0.5, cx1 - 0.5, cy1 - 0.5, bw)
+            elif n > 1:
                 _draw_border((0.0, 0.0, 0.0, 1.0), cx0, cy0, cx1, cy1, bw)
-                if oid and cw >= 40 * ps:
-                    _draw_label(oname.get(oid, oid), cx0 + 3 * ps, cy0 + 3 * ps, cw, ps)
-        _draw_border((0.0, 0.0, 0.0, 1.0), x0 - pad, by0 - pad, x0 + gw + pad, by0 + gh + pad, bw)
+            if n > 1 and oid and cw >= 40 * ps:
+                _draw_label(oname.get(oid, oid), cx0 + 3 * ps, cy0 + 3 * ps, cw, ps)
+        _draw_border((0.0, 0.0, 0.0, 1.0), gx0 - pad, gy0 - pad, gx0 + gw + pad, gy0 + gh + pad, bw)
     gpu.state.blend_set("NONE")
 
 
@@ -1706,6 +2217,10 @@ def _toggle_enabled(self, context):
 
 def _mark_dirty(self, context):
     _state["dirty"] = True
+
+
+def _redraw(self, context):
+    _tag_node_editors()
 
 
 def _node_show_update(self, context):
@@ -1754,12 +2269,25 @@ TR = {
         "ctx_show": "Show Node Preview",
         "comp_groups": "Inside Node Groups",
         "pref_limit_fmt": "At the limit: ~%d MB (Low) / ~%d MB (Medium) / ~%d MB (High)",
+        "time_budget": "Time Budget (ms)",
+        "update_on_frame": "Update on Frame Change",
+        "environment": "Environment",
+        "display_box": "Display",
+        "thumb_scale": "Thumbnail Size",
+        "thumb_position": "Position",
+        "zoom_active": "Enlarge Active Node",
+        "checker_bg": "Checkerboard",
+        "show_status": "Status Markers",
+        "show_values": "Show Values",
+        "failed_fmt": "%d preview(s) failed - see the system console",
+        "keys_title": "Shortcuts (Node Editor, Ctrl+Alt):",
+        "export": "Export Node Preview...",
         "help_tip": "Explain what each option and button does",
         "help_title": "Node Preview - what each control does",
         "help_tabs": [
             ("GENERAL", "General"), ("FILTER", "Filter"), ("OUTPUTS", "Outputs"),
             ("SHADER", "Shader"), ("EDITORS", "Editors"),
-            ("GROUPS", "Groups"), ("CACHE", "Cache"),
+            ("GROUPS", "Groups"), ("DISPLAY", "Display"), ("CACHE", "Cache"),
         ],
         "help": {
             "GENERAL": [
@@ -1768,11 +2296,15 @@ TR = {
                 ("line", "        also after texture painting an image or"),
                 ("line", "        editing inside a node group."),
                 ("line", "Quality:  thumbnail resolution (64 / 128 / 256 px)."),
-                ("line", "Nodes / Tick:  previews rendered per step. Higher ="),
-                ("line", "        faster refresh but more stutter."),
+                ("line", "Nodes / Tick:  most previews rendered per step;"),
+                ("line", "        Time Budget (ms) ends a step early. Selected"),
+                ("line", "        and on-screen nodes render first."),
+                ("line", "Update on Frame Change:  re-render when the frame"),
+                ("line", "        changes. Off: previews pause during playback."),
                 ("line", "Engine:  follows the scene's Render Engine."),
                 ("sec", "Buttons"),
                 ("line", "Refresh:  re-render every node in the current editor."),
+                ("line", "Export:  save the active node's preview as a PNG."),
                 ("line", "Trash:  clear all cached thumbnails."),
             ],
             "FILTER": [
@@ -1792,10 +2324,14 @@ TR = {
             ],
             "SHADER": [
                 ("line", "Shader nodes (BSDF / Output):"),
-                ("line", "Sphere / Plane:  lit material ball, or a flat swatch."),
-                ("line", "World Light:  even environment brightness on the ball."),
-                ("line", "Key Light:  sun strength (Sphere only)."),
-                ("line", "Texture / color nodes always show a flat swatch."),
+                ("line", "Sphere / Cube / Plane:  lit ball, cube, or flat swatch."),
+                ("line", "Environment:  Uniform (white), or one of Blender's"),
+                ("line", "        studio HDRIs (Forest, City, ...)."),
+                ("line", "World Light:  environment brightness on the ball."),
+                ("line", "Key Light:  sun strength (Sphere / Cube)."),
+                ("line", "Texture / color nodes always show a flat swatch;"),
+                ("line", "        Value outputs also show their number."),
+                ("line", "Lights:  a light's node tree previews like a material."),
             ],
             "EDITORS": [
                 ("line", "Turn these on to preview the other editors:"),
@@ -1805,6 +2341,7 @@ TR = {
                 ("line", "        of the geometry."),
                 ("line", "        Texture / Math Nodes (checkbox): also show a"),
                 ("line", "        flat swatch for texture / math / colour nodes."),
+                ("line", "        A tree on several objects previews the active one."),
                 ("line", "Compositor:  each node's image. Renders the scene per"),
                 ("line", "        node, so it is heavier. Updates on node edits;"),
                 ("line", "        press Refresh after changing the 3D scene."),
@@ -1819,6 +2356,20 @@ TR = {
                 ("line", "Compositor:  previews inside groups can be switched"),
                 ("line", "        off with Inside Node Groups (under Compositor);"),
                 ("line", "        each node renders the scene once."),
+            ],
+            "DISPLAY": [
+                ("line", "Thumbnail Size:  width relative to the node."),
+                ("line", "Position:  above, below, left or right of the node."),
+                ("line", "Enlarge Active Node:  draw it bigger, on top."),
+                ("line", "Checkerboard:  shows transparency behind thumbnails."),
+                ("line", "Status Markers:  orange = waiting to re-render;"),
+                ("line", "        red / '!' = render failed (system console)."),
+                ("line", "        A failed node retries once it changes."),
+                ("line", "Show Values:  a Value swatch that is one number"),
+                ("line", "        shows it (e.g. Math with fixed inputs)."),
+                ("sec", "Shortcuts (Node Editor)"),
+                ("line", "Ctrl+Alt+P  show / hide previews"),
+                ("line", "Ctrl+Alt+R  refresh      Ctrl+Alt+Z  enlarge active"),
             ],
             "CACHE": [
                 ("line", "Cached: n / max  (panel bottom):  thumbnails kept"),
@@ -1865,12 +2416,25 @@ TR = {
         "ctx_show": "顯示節點預覽",
         "comp_groups": "群組內節點",
         "pref_limit_fmt": "達上限時約：%d MB（低）/ %d MB（中）/ %d MB（高）",
+        "time_budget": "時間預算（毫秒）",
+        "update_on_frame": "換影格時更新",
+        "environment": "環境光",
+        "display_box": "顯示",
+        "thumb_scale": "縮圖大小",
+        "thumb_position": "位置",
+        "zoom_active": "放大作用中節點",
+        "checker_bg": "棋盤格背景",
+        "show_status": "狀態標記",
+        "show_values": "顯示數值",
+        "failed_fmt": "%d 張預覽失敗 — 詳見系統主控台",
+        "keys_title": "快捷鍵（節點編輯器，Ctrl+Alt）：",
+        "export": "匯出節點預覽…",
         "help_tip": "說明各選項與按鈕的作用",
         "help_title": "節點預覽 — 各控制項的作用",
         "help_tabs": [
             ("GENERAL", "一般"), ("FILTER", "過濾"), ("OUTPUTS", "多輸出"),
             ("SHADER", "著色器"), ("EDITORS", "其他編輯器"),
-            ("GROUPS", "節點群組"), ("CACHE", "快取"),
+            ("GROUPS", "節點群組"), ("DISPLAY", "顯示"), ("CACHE", "快取"),
         ],
         "help": {
             "GENERAL": [
@@ -1879,11 +2443,15 @@ TR = {
                 ("line", "        用 Texture Paint 繪製、或修改節點群組內容"),
                 ("line", "        後也會更新。"),
                 ("line", "畫質：縮圖解析度（64 / 128 / 256 px）。"),
-                ("line", "每次算幾個：每次更新算幾張。越高越快，"),
-                ("line", "        但算圖時較卡。"),
+                ("line", "每次算幾個：每次最多算幾張；超過時間預算"),
+                ("line", "        （毫秒）就提早結束。選取的節點與畫面上"),
+                ("line", "        看得到的節點優先算。"),
+                ("line", "換影格時更新：換影格時重算。關閉時播放動畫"),
+                ("line", "        期間暫停預覽。"),
                 ("line", "引擎：跟隨場景的算圖引擎（EEVEE / Cycles）。"),
                 ("sec", "按鈕"),
                 ("line", "刷新：重算目前編輯器中所有節點。"),
+                ("line", "匯出：把作用中節點的預覽存成 PNG。"),
                 ("line", "垃圾桶：清除所有快取縮圖。"),
             ],
             "FILTER": [
@@ -1903,10 +2471,14 @@ TR = {
             ],
             "SHADER": [
                 ("line", "著色器節點（BSDF / 輸出）："),
-                ("line", "球體 / 平面：打光材質球，或平面色板。"),
-                ("line", "世界光：材質球的均勻環境亮度。"),
-                ("line", "主光：塑形的主光強度（僅球體）。"),
-                ("line", "貼圖 / 顏色節點一律顯示平面色板。"),
+                ("line", "球體 / 方塊 / 平面：打光材質球、方塊或平面色板。"),
+                ("line", "環境光：均勻白光，或 Blender 內建的攝影棚"),
+                ("line", "        HDRI（Forest、City…）。"),
+                ("line", "世界光：材質球的環境亮度。"),
+                ("line", "主光：塑形的主光強度（球體 / 方塊）。"),
+                ("line", "貼圖 / 顏色節點一律顯示平面色板；"),
+                ("line", "        Value 輸出另外顯示數字。"),
+                ("line", "燈光：燈光的節點樹會像材質一樣預覽。"),
             ],
             "EDITORS": [
                 ("line", "開啟後即可預覽其他編輯器："),
@@ -1915,6 +2487,7 @@ TR = {
                 ("line", "        3D 算圖顯示。"),
                 ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
                 ("line", "        數學 / 顏色節點顯示為平面色板。"),
+                ("line", "        多個物件共用同一棵樹時，以作用中物件為準。"),
                 ("line", "合成器：各節點的影像結果。每個節點會算一次"),
                 ("line", "        場景，較重。編輯節點時自動更新；3D 場景"),
                 ("line", "        變動後請按刷新。"),
@@ -1928,6 +2501,20 @@ TR = {
                 ("line", "        群組節點計算。"),
                 ("line", "合成器：群組內的預覽可用「合成器」底下的"),
                 ("line", "        「群組內節點」關閉；每個節點各算一次場景。"),
+            ],
+            "DISPLAY": [
+                ("line", "縮圖大小：相對於節點寬度。"),
+                ("line", "位置：節點的上、下、左或右。"),
+                ("line", "放大作用中節點：畫得更大，並蓋在最上層。"),
+                ("line", "棋盤格背景：讓縮圖的透明部分看得出來。"),
+                ("line", "狀態標記：橘框 = 等待重算；"),
+                ("line", "        紅框 / 「!」= 算圖失敗（見系統主控台）。"),
+                ("line", "        失敗的節點有變動時才會重試。"),
+                ("line", "顯示數值：整張都是同一個數字的 Value 色板"),
+                ("line", "        會顯示該數字（例如輸入固定的 Math）。"),
+                ("sec", "快捷鍵（節點編輯器）"),
+                ("line", "Ctrl+Alt+P  顯示 / 隱藏預覽"),
+                ("line", "Ctrl+Alt+R  刷新      Ctrl+Alt+Z  放大作用中節點"),
             ],
             "CACHE": [
                 ("line", "快取：n / max（面板底部）：目前保留在 GPU 記憶體"),
@@ -1997,12 +2584,33 @@ class NPVProps(bpy.types.PropertyGroup):
         items=[("64", "Low (64px)", ""), ("128", "Medium (128px)", ""),
                ("256", "High (256px)", "")],
         default="128", update=_mark_dirty)
-    batch_size: bpy.props.IntProperty(name="Nodes / Tick", default=2, min=1, max=8)
+    batch_size: bpy.props.IntProperty(
+        name="Nodes / Tick",
+        description="Most previews rendered per step",
+        default=2, min=1, max=8)
+    time_budget: bpy.props.IntProperty(
+        name="Time Budget",
+        description="Stop a step's renders once this much time is spent (at "
+                    "least one render per step). Lower = smoother UI, slower "
+                    "refresh",
+        default=250, min=20, max=2000)
+    update_on_frame: bpy.props.BoolProperty(
+        name="Update on Frame Change",
+        description="Re-render previews when the frame changes (Scene Time, "
+                    "image sequences, simulations) and keep rendering during "
+                    "playback. Off: previews pause while animation plays",
+        default=False, update=_mark_dirty)
     shader_shape: bpy.props.EnumProperty(
         name="Shader Shape",
         items=[("SPHERE", "Sphere", "Material-ball preview, lit"),
+               ("CUBE", "Cube", "Lit cube, three faces visible"),
                ("PLANE", "Plane", "Flat lit swatch")],
         default="SPHERE", update=_mark_dirty)
+    preview_env: bpy.props.EnumProperty(
+        name="Environment",
+        description="Lighting for shader balls: an even white world, or one of "
+                    "Blender's bundled studio HDRIs",
+        items=_env_items, update=_mark_dirty)
     world_strength: bpy.props.FloatProperty(
         name="World Light", default=1.0, min=0.0, max=10.0, update=_mark_dirty)
     sun_strength: bpy.props.FloatProperty(
@@ -2029,6 +2637,43 @@ class NPVProps(bpy.types.PropertyGroup):
     preview_world: bpy.props.BoolProperty(
         name="World",
         description="Preview world / environment shader nodes",
+        default=True, update=_mark_dirty)
+    # -- Display (drawing only; nothing re-renders)
+    thumb_scale: bpy.props.FloatProperty(
+        name="Thumbnail Size",
+        description="Thumbnail width relative to the node's width",
+        default=1.0, min=0.25, max=3.0, update=_redraw)
+    thumb_position: bpy.props.EnumProperty(
+        name="Position",
+        description="Where the thumbnail sits relative to its node",
+        items=[("ABOVE", "Above", "Above the node"),
+               ("BELOW", "Below", "Below the node"),
+               ("LEFT", "Left", "Left of the node"),
+               ("RIGHT", "Right", "Right of the node")],
+        default="ABOVE", update=_redraw)
+    zoom_active: bpy.props.BoolProperty(
+        name="Enlarge Active Node",
+        description="Draw the active node's thumbnail larger, on top "
+                    "(Ctrl+Alt+Z in the node editor)",
+        default=False, update=_redraw)
+    zoom_factor: bpy.props.FloatProperty(
+        name="Enlarge",
+        description="Size of the active node's thumbnail when enlarged",
+        default=2.5, min=1.25, max=6.0, update=_redraw)
+    checker_bg: bpy.props.BoolProperty(
+        name="Checkerboard",
+        description="Draw a checkerboard behind thumbnails so transparency "
+                    "shows",
+        default=False, update=_redraw)
+    show_status: bpy.props.BoolProperty(
+        name="Status Markers",
+        description="Orange outline: waiting to re-render. Red outline / '!': "
+                    "the last render failed (see the system console)",
+        default=True, update=_redraw)
+    show_values: bpy.props.BoolProperty(
+        name="Show Values",
+        description="Write the number on a Value swatch when the whole swatch "
+                    "is one value (e.g. a Math node with fixed inputs)",
         default=True, update=_mark_dirty)
 
 
@@ -2094,14 +2739,90 @@ class NPV_OT_clear(bpy.types.Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, context):
-        _state["textures"].clear()
-        _state["tex_tick"].clear()
-        _state["img_gen"].clear()
-        _state["hashes"].clear()
-        _state["queue"].clear()
-        _state["queued_keys"].clear()
+        _reset_cache()
         _tag_node_editors()
         self.report({"INFO"}, "Preview cache cleared")
+        return {"FINISHED"}
+
+
+def export_job(tree, kind, props, node, path=None):
+    """Queue-style item that renders ``node`` of ``tree`` (entered through
+    ``path``), or None when the node can't be previewed from here."""
+    path = list(path) if path else [tree]
+    if path[-1].as_pointer() != tree.as_pointer():
+        path = [tree]
+    chain = _instance_chain(path)
+    src = resolve_source(path[0], kind) if chain is not None else None
+    if src is None:
+        return None
+    oid = _preview_targets(node, kind, props)[0]
+    return {"kind": kind, "src": src[1], "src_type": src[0], "tree": tree.name,
+            "root": path[0].name, "chain": chain, "node": node.name, "out": oid,
+            "key": None, "hash": None}
+
+
+class NPV_OT_export(bpy.types.Operator):
+    bl_idname = "node.npv_export"
+    bl_label = "Export Preview"
+    bl_description = ("Render the active node's preview at the chosen size and "
+                      "save it as a PNG")
+    bl_options = {"REGISTER"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.png", options={"HIDDEN"})
+    size: bpy.props.EnumProperty(
+        name="Size",
+        items=[("256", "256 px", ""), ("512", "512 px", ""),
+               ("1024", "1024 px", ""), ("2048", "2048 px", "")],
+        default="512")
+    load_image: bpy.props.BoolProperty(
+        name="Open in Blender",
+        description="Also load the saved PNG as an image data-block",
+        default=True)
+
+    @classmethod
+    def poll(cls, context):
+        return _panel_poll(context) and getattr(context, "active_node", None) is not None
+
+    def invoke(self, context, event):
+        node = context.active_node
+        safe = bpy.path.clean_name(node.name) or "node"
+        self.filepath = os.path.join(os.path.dirname(bpy.data.filepath) or
+                                     os.path.expanduser("~"), safe + ".png")
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        sp = context.space_data
+        node = getattr(context, "active_node", None)
+        if not _panel_poll(context) or node is None:
+            self.report({"WARNING"}, "Run Export from a node editor with an active node")
+            return {"CANCELLED"}
+        props = context.scene.npv
+        kind = space_kind(sp)
+        fp = bpy.path.ensure_ext(bpy.path.abspath(self.filepath), ".png")
+        path = [p.node_tree for p in sp.path if p.node_tree is not None]
+        job = export_job(sp.edit_tree, kind, props, node, path or None)
+        if job is None:
+            self.report({"WARNING"}, "This node can't be previewed here")
+            return {"CANCELLED"}
+        _state["export_to"] = fp
+        _state["rendering"] = True
+        try:
+            ok = _render_item(job, int(self.size), props)
+        except Exception as exc:
+            print("[NodePreview] export failed for %s: %r" % (node.name, exc))
+            ok = None
+        finally:
+            _state["export_to"] = None
+            _state["rendering"] = False
+        if not ok or not os.path.isfile(fp):
+            self.report({"ERROR"}, "Export failed (see the system console)")
+            return {"CANCELLED"}
+        if self.load_image:
+            img = bpy.data.images.load(fp, check_existing=True)
+            img.reload()        # an earlier export to the same file
+        self.report({"INFO"}, "Saved %s" % fp)
         return {"FINISHED"}
 
 
@@ -2173,6 +2894,8 @@ class NPV_PT_panel(bpy.types.Panel):
         col.prop(props, "auto_update", text=t("auto_update"))
         col.prop(props, "resolution", text=t("quality"))
         col.prop(props, "batch_size", text=t("nodes_tick"))
+        col.prop(props, "time_budget", text=t("time_budget"))
+        col.prop(props, "update_on_frame", text=t("update_on_frame"))
         col.label(text=t("engine_fmt")
                   % context.scene.render.engine.replace("BLENDER_", "").title())
         if kind in (KIND_SHADER, KIND_WORLD):
@@ -2202,10 +2925,25 @@ class NPV_PT_panel(bpy.types.Panel):
             box = body.box()
             box.label(text=t("shader_box"), icon="SHADING_RENDERED")
             box.prop(props, "shader_shape", expand=True)
+            box.prop(props, "preview_env", text=t("environment"))
             box.prop(props, "world_strength", slider=True, text=t("world_light"))
             sub = box.column(align=True)
-            sub.enabled = (props.shader_shape == "SPHERE")
+            sub.enabled = (props.shader_shape != "PLANE")
             sub.prop(props, "sun_strength", slider=True, text=t("key_light"))
+
+        dbox = body.box()
+        dbox.label(text=t("display_box"), icon="IMAGE_BACKGROUND")
+        dbox.prop(props, "thumb_scale", slider=True, text=t("thumb_scale"))
+        dbox.prop(props, "thumb_position", text=t("thumb_position"))
+        r = dbox.row(align=True)
+        r.prop(props, "zoom_active", text=t("zoom_active"), toggle=True)
+        sub = r.row(align=True)
+        sub.enabled = props.zoom_active
+        sub.prop(props, "zoom_factor", text="")
+        r = dbox.row()
+        r.prop(props, "checker_bg", text=t("checker_bg"))
+        r.prop(props, "show_status", text=t("show_status"))
+        dbox.prop(props, "show_values", text=t("show_values"))
 
         box = body.box()
         box.label(text=t("other_editors"), icon="NODETREE")
@@ -2226,11 +2964,17 @@ class NPV_PT_panel(bpy.types.Panel):
 
         row = body.row(align=True)
         row.operator("node.npv_refresh", text=t("refresh"), icon="FILE_REFRESH")
+        row.operator("node.npv_export", text="", icon="EXPORT")
         row.operator("node.npv_clear", text="", icon="TRASH")
 
         if _state["queue"]:
             body.label(text=t("rendering_fmt") % len(_state["queue"]),
                        icon="SORTTIME")
+        nfail = sum(1 for k in _state["failed"]
+                    if k.startswith("%d:" % context.space_data.edit_tree.as_pointer()))\
+            if getattr(context.space_data, "edit_tree", None) is not None else 0
+        if nfail:
+            body.label(text=t("failed_fmt") % nfail, icon="ERROR")
         body.label(text=t("cached_fmt") % (len(_state["textures"]), _max_textures()),
                    icon="IMAGE_DATA")
 
@@ -2265,10 +3009,49 @@ class NPVAddonPrefs(bpy.types.AddonPreferences):
         col.label(text=fmt % tuple(
             max(1, round(self.max_textures * mb[r])) for r in ("64", "128", "256")),
             icon="INFO")
+        col.separator()
+        col.label(text=(_t(npv, "keys_title") if npv is not None
+                        else TR["EN"]["keys_title"]), icon="KEYINGSET")
+        for km, kmi in _addon_keymaps:
+            r = col.row()
+            r.label(text=kmi.name or kmi.idname)
+            r.prop(kmi, "type", text="", full_event=True)
 
 
 _classes = (NPVProps, NPVAddonPrefs, NPV_OT_refresh, NPV_OT_mark, NPV_OT_clear,
-            NPV_OT_help, NPV_PT_panel)
+            NPV_OT_export, NPV_OT_help, NPV_PT_panel)
+
+# (keymap, item) pairs added to the add-on keyconfig; removed on unregister.
+_addon_keymaps = []
+
+# Node editor shortcuts (remappable in Preferences > Keymap > Node Editor).
+KEYMAP_ITEMS = (
+    ("wm.context_toggle", "P", {"data_path": "scene.npv.enabled"}),
+    ("node.npv_refresh", "R", {}),
+    ("wm.context_toggle", "Z", {"data_path": "scene.npv.zoom_active"}),
+)
+
+
+def _register_keymaps():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon if wm is not None else None
+    if kc is None:        # background mode has no key configuration
+        return
+    km = kc.keymaps.new(name="Node Editor", space_type="NODE_EDITOR")
+    for idname, key, attrs in KEYMAP_ITEMS:
+        kmi = km.keymap_items.new(idname, key, "PRESS", ctrl=True, alt=True)
+        for k, v in attrs.items():
+            setattr(kmi.properties, k, v)
+        _addon_keymaps.append((km, kmi))
+
+
+def _unregister_keymaps():
+    for km, kmi in _addon_keymaps:
+        try:
+            km.keymap_items.remove(kmi)
+        except Exception:
+            pass
+    _addon_keymaps.clear()
 
 
 def _node_context_menu(self, context):
@@ -2280,6 +3063,8 @@ def _node_context_menu(self, context):
         if len(_previewable_outputs(node, space_kind(sp))) > 1:
             self.layout.prop(node, "npv_socket",
                              text=_t(context.scene.npv, "preview_socket"))
+        self.layout.operator("node.npv_export", icon="EXPORT",
+                             text=_t(context.scene.npv, "export"))
 
 
 def _cleanup_datablocks():
@@ -2296,8 +3081,8 @@ def _cleanup_datablocks():
             bpy.data.scenes.remove(scn)
         except Exception:
             pass
-    for name in (PREVIEW_PLANE, PREVIEW_SPHERE, PREVIEW_CAM, PREVIEW_SUN,
-                 "NPV_vol_light"):
+    for name in (PREVIEW_PLANE, PREVIEW_SPHERE, PREVIEW_CUBE, PREVIEW_CAM,
+                 PREVIEW_SUN, "NPV_vol_light"):
         o = bpy.data.objects.get(name)
         if o is not None:
             data = o.data
@@ -2314,6 +3099,11 @@ def _cleanup_datablocks():
                 bpy.data.worlds.remove(w)
             except Exception:
                 pass
+    for img in [i for i in bpy.data.images if i.name.startswith(ENV_IMAGE_PREFIX)]:
+        try:
+            bpy.data.images.remove(img)
+        except Exception:
+            pass
 
 
 def register():
@@ -2323,7 +3113,7 @@ def register():
     bpy.types.Node.npv_show = bpy.props.BoolProperty(
         name="Show Preview",
         description="Show this node's preview thumbnail "
-                    "(applies when 'Only Marked Nodes' is on)",
+                    "(applies when Preview Scope is Marked)",
         default=True, update=_node_show_update)
     bpy.types.Node.npv_socket = bpy.props.EnumProperty(
         name="Preview Socket",
@@ -2343,11 +3133,18 @@ def register():
         bpy.app.handlers.load_post.append(_on_load_post)
     if _on_save_pre not in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.append(_on_save_pre)
+    if _on_frame_change not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_on_frame_change)
+    try:
+        _register_keymaps()
+    except Exception as exc:
+        print("[NodePreview] keymap registration failed: %r" % (exc,))
     _state["dirty"] = True
     _ensure_timer()
 
 
 def unregister():
+    _unregister_keymaps()
     try:
         bpy.types.NODE_MT_context_menu.remove(_node_context_menu)
     except Exception:
@@ -2367,6 +3164,8 @@ def unregister():
         bpy.app.handlers.load_post.remove(_on_load_post)
     if _on_save_pre in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.remove(_on_save_pre)
+    if _on_frame_change in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_on_frame_change)
     if bpy.app.timers.is_registered(_timer):
         try:
             bpy.app.timers.unregister(_timer)
@@ -2379,12 +3178,10 @@ def unregister():
         except Exception:
             pass
         _state["draw_handle"] = None
-    _state["textures"].clear()
-    _state["tex_tick"].clear()
-    _state["img_gen"].clear()
-    _state["hashes"].clear()
-    _state["queue"].clear()
-    _state["queued_keys"].clear()
+    _reset_cache()
+    _state["src_hint"] = []
+    _state["shader_image"] = None
+    _state["shader_color"] = None
     _cleanup_datablocks()
     del bpy.types.Scene.npv
     for c in reversed(_classes):

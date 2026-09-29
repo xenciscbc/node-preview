@@ -22,9 +22,16 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   Tab into a group its nodes are previewed with the values the outer group
   node actually passes in (Shader, World, Geometry Nodes and Compositor; the
   compositor part can be switched off with *Inside Node Groups*).
+- **Lights** — a light's node tree (Cycles) previews like a material.
 - **Engine** follows the scene's Render Engine (EEVEE / Cycles).
 - **Auto update** (only re-renders nodes whose inputs changed, including after
   texture painting an image or editing inside a node group) + manual Refresh.
+  Selected and on-screen nodes render first; a **Time Budget** keeps each step
+  short so the UI stays responsive. Previews pause during animation playback
+  unless **Update on Frame Change** is on (Scene Time, image sequences, ...).
+  Moving objects no longer triggers re-hashing.
+- **Shared trees** — a Geometry Nodes tree used by several objects previews
+  the active one; a material previews through the one shown in the editor.
 - **Preview Scope** (All / Selected / Marked) to control which nodes preview —
   Selected follows your node selection; Marked uses per-node toggles (right-click
   menu or Mark / Unmark buttons).
@@ -34,6 +41,18 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 - **Thumbnail cache limit** — *Max Cached Thumbnails* in the add-on's
   Preferences (least recently shown are released; the editor you are looking
   at keeps its own); the panel shows `Cached: n / max`.
+- **Shader preview** — Sphere / **Cube** / Plane, lit by a uniform world or
+  one of Blender's bundled studio **HDRIs**.
+- **Value numbers** — a Value swatch that is a single number (e.g. Math with
+  fixed inputs) shows that number on the thumbnail.
+- **Display** — thumbnail size, position (above / below / left / right),
+  **Enlarge Active Node**, checkerboard background, and **status markers**
+  (orange = waiting to re-render, red `!` = render failed; a failed node is
+  not retried until it changes).
+- **Export** the active node's preview as a PNG (256–2048 px) from the panel
+  or the node right-click menu.
+- **Shortcuts** (Node Editor): `Ctrl+Alt+P` show / hide, `Ctrl+Alt+R`
+  refresh, `Ctrl+Alt+Z` enlarge active node (remap in Preferences > Keymap).
 - **Help popup** (one page per topic) and an **Auto / English / 中文** UI
   toggle — Auto follows Blender's own language setting (non-Chinese falls
   back to English).
@@ -42,7 +61,7 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 
 ### As a Blender Extension (Blender 5.2+)
 `Edit > Preferences > Get Extensions > ▼ > Install from Disk…` and pick
-`dist/node_preview-1.3.0.zip`.
+`dist/node_preview-1.4.0.zip`.
 
 ### As a legacy add-on
 `Edit > Preferences > Add-ons > ▼ > Install from Disk…` and pick
@@ -105,7 +124,7 @@ Upload the zip that `python build_extension.py` wrote to `dist/` (the build
 already ran `extension validate` on it). To re-check a zip by hand:
 
 ```
-blender --command extension validate dist/node_preview-1.3.0.zip
+blender --command extension validate dist/node_preview-1.4.0.zip
 ```
 
 ## License
