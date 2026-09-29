@@ -824,6 +824,8 @@ def test_pinned_editor_keeps_its_own_hint(mod):
         assert not mod._state["dirty"], "two editors keep re-queueing each other"
         # Sharing one tree, both are rebuilt, each through its own object:
         # the source is part of the cache key, so they don't collide.
+        # (Editors of a preview type that is off are no targets.)
+        props.preview_geometry = True
         orig = mod._live_space_ptrs
         mod._live_space_ptrs = lambda: None
         try:
@@ -833,6 +835,7 @@ def test_pinned_editor_keeps_its_own_hint(mod):
         assert sorted(repr(t[3]) for t in targets) == sorted(
             [repr([("OBJ", a.name)]), repr([("OBJ", b.name)])]), targets
     finally:
+        props.preview_geometry = False
         mod._state["editors"].clear()
         _clear(mod)
         for ob in (a, b):

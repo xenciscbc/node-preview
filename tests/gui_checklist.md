@@ -65,3 +65,8 @@ actually drawn in the node editor. Rules:
 | 42 | Compositor | Temp scene with Stereoscopy on (Stereo 3D, Views Format: Individual) | Thumbnails render normally (no red `!`); Stereoscopy is still on afterwards |
 | 43 | Shader | Shader Shape = Cube | The BSDF thumbnail is a hexagon: three faces of the cube visible |
 | 44 | Geometry Nodes | Repeat (or Simulation / For Each) zone with a Transform before it; select, move and relabel the Repeat Output node | No thumbnail re-renders (no orange outlines) |
+| 45 | Geometry Nodes | Object with two GN modifiers (A then B); view B's tree and edit a node in A's tree | B's geometry previews re-render |
+| 46 | Geometry Nodes | Mesh with shape keys (Basis + one more) feeding a GN tree; drag the key's Value slider; edit the key's shape in Edit Mode | Previews follow the slider; the shape edit shows after leaving Edit Mode |
+| 47 | Geometry Nodes | Edit Mode: Flip Normals (or Rotate Edge), back to Object Mode | Geometry previews re-render |
+| 48 | Geometry Nodes | Repeat zone: nodes inside it (Repeat Input, a Transform in the loop, a Mesh joined in) and outside it | Nodes inside the zone show no thumbnail (no black squares); nodes before / after the zone and the Repeat Output do; the Help Editors page mentions zones |
+| 49 | Any | Switch an editor showing previews to a Texture Node editor (or turn its preview type off) | "Rendering..." goes away; editing the old tree from another editor doesn't render it for the hidden one |

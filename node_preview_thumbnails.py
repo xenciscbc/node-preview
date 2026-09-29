@@ -296,6 +296,52 @@ def _shader_eligible(node, only_tex_shader):
     return idn in COLOR_VECTOR_NODES
 
 
+_zone_cache = {}     # tree pointer -> names of nodes inside a zone (per pass)
+
+
+def _zone_members(tree):
+    """Names of the nodes inside Repeat / Simulation / For Each (any paired
+    input / output) zones of ``tree``: downstream of a zone input, or feeding
+    its output without also feeding the zone input. A node there can't be
+    wired out of the zone to the Group Output, so its preview would only be
+    black. The zone output itself is outside and previews fine."""
+    zins = [n for n in tree.nodes if getattr(n, "paired_output", None) is not None]
+    if not zins:
+        return frozenset()
+    down, up = {}, {}
+    for l in tree.links:
+        down.setdefault(l.from_node.name, []).append(l.to_node.name)
+        up.setdefault(l.to_node.name, []).append(l.from_node.name)
+
+    def reach(start, graph, stop=None):
+        seen, todo = set(), list(graph.get(start, ()))
+        while todo:
+            n = todo.pop()
+            if n in seen or n == stop:
+                continue
+            seen.add(n)
+            todo.extend(graph.get(n, ()))
+        return seen
+
+    members = set()
+    for zi in zins:
+        zo = zi.paired_output.name
+        before = reach(zi.name, up)
+        members |= reach(zi.name, down, stop=zo)
+        members |= reach(zo, up, stop=zi.name) - before
+        members.add(zi.name)
+    return frozenset(members)
+
+
+def _in_zone(node):
+    tree = node.id_data
+    key = tree.as_pointer()
+    got = _zone_cache.get(key)
+    if got is None:
+        got = _zone_cache[key] = _zone_members(tree)
+    return node.name in got
+
+
 def node_eligible(node, kind, props):
     if node.type in SKIP_TYPES or node.bl_idname in SKIP_IDN:
         return False
@@ -307,7 +353,7 @@ def node_eligible(node, kind, props):
     if kind == KIND_SHADER or kind == KIND_WORLD:
         return _shader_eligible(node, props.only_tex_shader)
     if kind == KIND_GEO:
-        if not _previewable_outputs(node, kind):
+        if not _previewable_outputs(node, kind) or _in_zone(node):
             return False
         # Field-swatch nodes (no geometry output) are gated by a checkbox.
         if not any(s.type == "GEOMETRY" for s in node.outputs):
@@ -1823,7 +1869,13 @@ def _geo_source_sig(obj_ref, root):
     idx = _geo_modifier_index(obj, root)
     if idx is None:
         return ""
-    parts = [_modifier_sig(m) for m in list(obj.modifiers)[:idx + 1]]
+    mods = list(obj.modifiers)
+    parts = [_modifier_sig(m) for m in mods[:idx + 1]]
+    # An earlier Geometry Nodes modifier's tree shapes the geometry every
+    # node of this one receives: its contents, not just its name.
+    for m in mods[:idx]:
+        if m.type == 'NODES' and m.node_group is not None:
+            parts.append(("tree", m.name, tree_signature(m.node_group)))
     # Vertex groups: the names live on the object (a node reads a group by
     # name), so they are read here, not cached with the mesh.
     parts.append(tuple(g.name for g in obj.vertex_groups))
@@ -1852,13 +1904,19 @@ _ATTR_FIELDS = {
 VGROUP_WEIGHT_LIMIT = 100000   # vertices; above it weights aren't hashed
 
 
+_UI_ATTR_PREFIXES = (".select", ".hide", ".uv_select", ".vs.", ".es.", ".pn.",
+                     ".sculpt_mask")
+
+
 def _attrs_sig(attrs):
-    """Every user attribute's name, domain, type and values (positions, UVs,
-    colours, custom attributes ...). Internal '.'-prefixed ones (selection,
-    hiding) don't change what a preview shows and are skipped."""
+    """Every attribute's name, domain, type and values: positions, UVs,
+    colours, custom attributes, and the internal topology arrays
+    (.edge_verts, .corner_vert ...: Flip Normals / Rotate Edge change only
+    these). Selection, hiding and UV-editor state are skipped: they don't
+    change what a preview shows."""
     out = []
     for a in attrs:
-        if a.name.startswith("."):
+        if a.name.startswith(_UI_ATTR_PREFIXES):
             continue
         f = _ATTR_FIELDS.get(a.data_type)
         try:
@@ -1919,9 +1977,26 @@ def _gpencil_sig(data):
     return tuple(out)
 
 
+def _shape_keys_sig(data):
+    """Shape keys: each key's value, range, mute, relative key, vertex group
+    and point positions (a slider drag or editing a non-Basis key changes
+    the shape the preview renders)."""
+    sk = getattr(data, "shape_keys", None)
+    if sk is None:
+        return None
+    out = [sk.use_relative, round(getattr(sk, "eval_time", 0.0), 5)]
+    for kb in sk.key_blocks:
+        out.append((kb.name, round(kb.value, 5), round(kb.slider_min, 5),
+                    round(kb.slider_max, 5), kb.mute, kb.interpolation,
+                    kb.relative_key.name if kb.relative_key else None,
+                    kb.vertex_group, _coords_digest(kb.data, "co", 3)))
+    return tuple(out)
+
+
 def _compute_data_sig(data, obj=None):
     parts = [_idref(data), _simple_props_sig(data)]   # bevel, text size, ...
     try:
+        parts.append(_shape_keys_sig(data))
         attrs = getattr(data, "attributes", None)
         if attrs is not None:
             parts.append(_attrs_sig(attrs))
@@ -1993,6 +2068,7 @@ def rebuild_queue(tree, kind, props, force=False, path=None):
 
 
 def _rebuild_queue(tree, kind, props, force, path):
+    _zone_cache.clear()
     path = list(path) if path else [tree]
     if path[-1].as_pointer() != tree.as_pointer():
         path = [tree]
@@ -2311,7 +2387,9 @@ def _editor_targets():
     """(tree, kind, path, source hint) for every editor showing previews.
     With no editor recorded (e.g. background mode) the last drawn one."""
     _prune_editors()
-    eds = list(_state["editors"].values())
+    props = _get_props()
+    eds = [e for e in _state["editors"].values()
+           if props is None or _kind_enabled(e["kind"], props)]
     # Editors on the same tree through different sources (pinned to another
     # object, a group entered from another material) each get their own
     # thumbnails: the source is part of the cache key (_view_ctx).
@@ -2401,6 +2479,11 @@ def _on_depsgraph(scene, depsgraph):
         try:
             if idt in _DATA_ID_TYPES:
                 _mark_data_changed(_idref(getattr(upd.id, "original", upd.id)))
+            elif idt == "KEY":
+                # A shape key slider: the Key's user is the mesh / curve.
+                user = getattr(getattr(upd.id, "original", upd.id), "user", None)
+                if user is not None:
+                    _mark_data_changed(_idref(user))
             elif idt == "OBJECT" and upd.is_updated_geometry:
                 # Sculpting, or a script's foreach_set + update_tag(), may tag
                 # only the object: its data may have changed too.
@@ -2421,7 +2504,7 @@ def _on_depsgraph(scene, depsgraph):
             name = upd.id.name
             _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
             _state["dirty"] = True
-        elif idt in _DATA_ID_TYPES:
+        elif idt in _DATA_ID_TYPES or idt == "KEY":
             # An object's own data may have changed (recorded above): re-hash;
             # its content is part of its GN previews' hash (_data_sig).
             _state["dirty"] = True
@@ -2696,20 +2779,33 @@ def _editor_view_ctx(space, tree, kind, hint):
     return _view_ctx(src, chain) if src is not None else ""
 
 
+def _forget_editor(space):
+    """This editor shows no previews (any more): stop rebuilding / protecting
+    the tree it showed before."""
+    try:
+        _state["editors"].pop(space.as_pointer(), None)
+    except Exception:
+        pass
+
+
 def draw_callback():
     ctx = bpy.context
     space = ctx.space_data
     if space is None or space.type != "NODE_EDITOR":
         return
     if space.tree_type not in KINDS:
+        _forget_editor(space)
         return
     kind = space_kind(space)
     props = getattr(ctx.scene, "npv", None)
     if props is None or not props.enabled or not _kind_enabled(kind, props):
+        _forget_editor(space)
         return
     tree = getattr(space, "edit_tree", None)
     if tree is None:
+        _forget_editor(space)
         return
+    _zone_cache.clear()
 
     ptr = tree.as_pointer()
     # Tree path of the editor (outermost first): entering a node group adds
@@ -3006,6 +3102,8 @@ TR = {
                 ("line", "        Texture / Math Nodes (checkbox): also show a"),
                 ("line", "        flat swatch for texture / math / colour nodes."),
                 ("line", "        A tree on several objects previews the active one."),
+                ("line", "        Nodes inside a Repeat / Simulation / For Each"),
+                ("line", "        zone get no preview (they can't be wired out)."),
                 ("line", "Compositor:  each node's image. Renders the scene per"),
                 ("line", "        node, so it is heavier. Updates on node edits;"),
                 ("line", "        press Refresh after changing the 3D scene."),
@@ -3153,6 +3251,8 @@ TR = {
                 ("line", "        貼圖 / 數學節點（勾選框）：另外把貼圖 /"),
                 ("line", "        數學 / 顏色節點顯示為平面色板。"),
                 ("line", "        多個物件共用同一棵樹時，以作用中物件為準。"),
+                ("line", "        Repeat / Simulation / For Each zone 內的節點"),
+                ("line", "        不顯示預覽（無法從 zone 內接出）。"),
                 ("line", "合成器：各節點的影像結果。每個節點會算一次"),
                 ("line", "        場景，較重。編輯節點時自動更新；3D 場景"),
                 ("line", "        變動後請按刷新。"),
@@ -3418,6 +3518,10 @@ class NPV_OT_clear(bpy.types.Operator):
 def export_job(tree, kind, props, node, path=None):
     """Queue-style item that renders ``node`` of ``tree`` (entered through
     ``path``), or None when the node can't be previewed from here."""
+    if kind == KIND_GEO:
+        _zone_cache.clear()
+        if _in_zone(node):
+            return None           # inside a zone: can't be wired out
     path = list(path) if path else [tree]
     if path[-1].as_pointer() != tree.as_pointer():
         path = [tree]
