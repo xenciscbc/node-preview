@@ -61,3 +61,7 @@ actually drawn in the node editor. Rules:
 | 38 | Geometry Nodes | GN tree reading a vertex group / an attribute (e.g. Named Attribute, Curve radius). Weight paint, vertex paint, change Curve Bevel depth / radius, Text size | Each change re-renders the previews. During Weight Paint strokes painting stays smooth; the previews update once you leave Weight Paint |
 | 39 | Geometry Nodes | Turn Auto Update off, move a vertex (Edit Mode, then back to Object Mode), turn Auto Update on | The previews show the moved vertex without pressing Refresh |
 | 40 | Geometry Nodes | Max Cached Thumbnails at 32; one GN tree shared by 6+ objects; click through the objects with the node editor open | "Cached: n / 32" stays at or below the limit, also while switching quickly (pruned right after renders; only the current object's thumbnails are protected) |
+| 41 | Compositor | Temp scene with Output set to FFmpeg Video (and once to OpenEXR MultiLayer); enable Compositor previews | Thumbnails render normally; the scene's output settings are unchanged |
+| 42 | Compositor | Temp scene with Stereoscopy on (Stereo 3D, Views Format: Individual) | Thumbnails render normally (no red `!`); Stereoscopy is still on afterwards |
+| 43 | Shader | Shader Shape = Cube | The BSDF thumbnail is a hexagon: three faces of the cube visible |
+| 44 | Geometry Nodes | Repeat (or Simulation / For Each) zone with a Transform before it; select, move and relabel the Repeat Output node | No thumbnail re-renders (no orange outlines) |

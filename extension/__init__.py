@@ -438,6 +438,10 @@ def _node_settings(node, _seen=frozenset()):
                     vals.append((pid, ref.name, tree_signature(ref, _seen)))
                 elif ref is None or isinstance(ref, bpy.types.ID):
                     vals.append((pid, ref.name if ref is not None else None))
+                elif isinstance(ref, (bpy.types.Node, bpy.types.NodeSocket)):
+                    # A zone input's paired_output: which node, not its
+                    # location / selection / label (links carry the data).
+                    vals.append((pid, ref.name))
                 elif isinstance(ref, bpy.types.CurveMapping):
                     vals.append((pid, _curve_sig(ref)))
                 else:
@@ -683,7 +687,7 @@ def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
         scn.collection.objects.link(cube)
     cube.location = (0, 0, 0)
     # Tilted so three faces show (a cube seen face-on reads as a square).
-    cube.rotation_euler = (0.6155, 0.0, 0.7854)
+    cube.rotation_euler = (0.7854, 0.6155, 0.0)   # isometric: 3 faces equal
     cube.scale = (0.98, 0.98, 0.98)
     cube.hide_render = True      # only render_shader's Cube shape shows it
 
@@ -1377,8 +1381,14 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
         r.use_compositing = True
         r.film_transparent = True
         # The copy inherits the user's output format (JPEG, EXR, ...); the
-        # loader needs an 8-bit RGBA PNG.
+        # loader needs an 8-bit RGBA PNG. A Video / Multilayer EXR output
+        # only accepts its own formats until the media type is Image again.
+        if "media_type" in r.image_settings.bl_rna.properties:
+            r.image_settings.media_type = "IMAGE"
         r.image_settings.file_format = "PNG"
+        # Stereoscopy ("Individual" views) writes npv_render_L/_R.png and
+        # never the file the loader reads.
+        r.use_multiview = False
         r.image_settings.color_mode = "RGBA"
         r.image_settings.color_depth = "8"
         # The copy inherits the user's final-render quality (e.g. 4096 Cycles
