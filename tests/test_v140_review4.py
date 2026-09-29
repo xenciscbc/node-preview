@@ -186,14 +186,16 @@ def test_nodes_inside_a_zone_get_no_preview(mod):
         links.new(after.outputs[0], go.inputs[0])
         mod._zone_cache.clear()
         inside = {n.name for n in nodes if mod._in_zone(n)}
-        assert {zi.name, "Inner", "Join", "JoinedIn"} <= inside, inside
-        assert not inside & {"Xform", zo.name, "After"}, inside
+        assert {zi.name, "Inner", "Join"} <= inside, inside
+        # A node that only feeds into the zone is outside it (Blender's zone
+        # frame doesn't include it; it can be wired to the Group Output).
+        assert not inside & {"Xform", zo.name, "After", "JoinedIn"}, inside
 
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
         queued = {it["node"] for it in mod._state["queue"]}
-        assert {"Xform", zo.name, "After"} <= queued, queued
+        assert {"Xform", zo.name, "After", "JoinedIn"} <= queued, queued
         assert not queued & inside, "nodes inside the zone queued: %r" % (queued & inside)
         assert mod.export_job(ng, mod.KIND_GEO, props, nodes["Inner"]) is None
     finally:

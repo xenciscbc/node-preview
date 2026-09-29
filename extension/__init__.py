@@ -293,34 +293,33 @@ _zone_cache = {}     # tree pointer -> names of nodes inside a zone (per pass)
 
 def _zone_members(tree):
     """Names of the nodes inside Repeat / Simulation / For Each (any paired
-    input / output) zones of ``tree``: downstream of a zone input, or feeding
-    its output without also feeding the zone input. A node there can't be
-    wired out of the zone to the Group Output, so its preview would only be
-    black. The zone output itself is outside and previews fine."""
+    input / output) zones of ``tree``: the zone input and everything
+    downstream of it up to the zone output -- what Blender itself puts in the
+    zone. A node that only feeds into the zone (a Mesh Cube joined in there,
+    a field sampled there) stays outside, like in Blender: it can be wired to
+    the Group Output too and previews fine. A node inside can't be wired out
+    of the zone, so its preview would only be black. The zone output itself
+    is outside and previews fine."""
     zins = [n for n in tree.nodes if getattr(n, "paired_output", None) is not None]
     if not zins:
         return frozenset()
-    down, up = {}, {}
+    down = {}
     for l in tree.links:
         down.setdefault(l.from_node.name, []).append(l.to_node.name)
-        up.setdefault(l.to_node.name, []).append(l.from_node.name)
 
-    def reach(start, graph, stop=None):
-        seen, todo = set(), list(graph.get(start, ()))
+    def reach(start, stop):
+        seen, todo = set(), list(down.get(start, ()))
         while todo:
             n = todo.pop()
             if n in seen or n == stop:
                 continue
             seen.add(n)
-            todo.extend(graph.get(n, ()))
+            todo.extend(down.get(n, ()))
         return seen
 
     members = set()
     for zi in zins:
-        zo = zi.paired_output.name
-        before = reach(zi.name, up)
-        members |= reach(zi.name, down, stop=zo)
-        members |= reach(zo, up, stop=zi.name) - before
+        members |= reach(zi.name, zi.paired_output.name)
         members.add(zi.name)
     return frozenset(members)
 
@@ -2354,8 +2353,9 @@ def _prune_editors():
     if live is None:
         return
     eds = _state["editors"]
-    for k in [k for k in eds if k not in live]:
-        del eds[k]
+    gone = [eds.pop(k) for k in [k for k in eds if k not in live]]
+    if gone:
+        _editors_gone(gone)
 
 
 def _in_view(key):
@@ -2377,7 +2377,8 @@ def _in_view(key):
 
 def _editor_targets():
     """(tree, kind, path, source hint) for every editor showing previews.
-    With no editor recorded (e.g. background mode) the last drawn one."""
+    With no editor recorded (e.g. background mode) the last drawn one --
+    cleared once the last recorded editor is forgotten (_editors_gone)."""
     _prune_editors()
     props = _get_props()
     eds = [e for e in _state["editors"].values()
@@ -2775,9 +2776,41 @@ def _forget_editor(space):
     """This editor shows no previews (any more): stop rebuilding / protecting
     the tree it showed before."""
     try:
-        _state["editors"].pop(space.as_pointer(), None)
+        ent = _state["editors"].pop(space.as_pointer(), None)
     except Exception:
-        pass
+        return
+    if ent is not None:
+        _editors_gone([ent])
+
+
+def _editors_gone(gone):
+    """Editors ``gone`` were forgotten: drop their pending renders that no
+    remaining editor shows, and once no editor is left, the last drawn tree
+    too -- the no-editor fallback (_editor_targets, _in_view) would otherwise
+    keep rebuilding and protecting the tree they showed."""
+    eds = _state["editors"]
+    if not eds:
+        _state["active_tree_ptr"] = None
+        _state["active_kind"] = None
+        _state["active_path"] = None
+    trees = {e.get("tree") for e in gone}
+    shown = {(e.get("tree"), e.get("ctx")) for e in eds.values()}
+
+    def orphan(k):
+        try:
+            ptr = int(k.split(":", 1)[0])
+        except ValueError:
+            return False
+        if ptr not in trees:
+            return False
+        kc = _key_ctx(k)
+        return not any(t == ptr and c in (kc, "", None) for t, c in shown)
+
+    q = _state["queue"]
+    drop = [it for it in q if orphan(it["key"])]
+    if drop:
+        q[:] = [it for it in q if not orphan(it["key"])]
+        _state["queued_keys"].difference_update(it["key"] for it in drop)
 
 
 def draw_callback():
