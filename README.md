@@ -79,7 +79,12 @@ for the sidebar, and use the **Preview** tab.
 ```
 extension/                        The add-on source (an extension package)
   blender_manifest.toml           Extension manifest: metadata and the version
-  __init__.py                     Add-on code
+  __init__.py                     Add-on entry: register(), rendering, queue,
+                                  drawing, operators and UI
+  common.py                       Shared constants, runtime state, cache keys
+  eligibility.py                  Which nodes / outputs get a preview
+  hashing.py                      Content hashes that trigger re-renders
+  i18n.py                         UI strings (English / Chinese)
 dist/                             Built zips (not in git; attached to Releases)
 build_extension.py                Zips extension/ into dist/
                                   (gated on the tests below)

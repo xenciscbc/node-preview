@@ -31,8 +31,9 @@ def _mark_rendered(mod):
 
 # --- 10: Material/World.use_nodes is deprecated in 5.x --------------------- #
 def test_source_does_not_use_deprecated_use_nodes(mod):
-    src = open(mod.__file__, encoding="utf-8").read()
-    assert "use_nodes" not in src, "deprecated use_nodes still referenced"
+    from npv_testutil import addon_sources
+    for path, src in addon_sources(mod):
+        assert "use_nodes" not in src, "deprecated use_nodes still referenced in %s" % path
 
 
 # --- 7: geometry previews must not copy the user's mesh -------------------- #

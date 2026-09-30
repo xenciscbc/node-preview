@@ -8,10 +8,12 @@ actually drawn in the node editor. Rules:
   `NPV_check_*` datablocks, make them active, and delete them afterwards;
   restore the previously active object and the window's scene.
 - Test the code about to ship: ideally the user installs `dist/<id>-<ver>.zip`
-  and restarts Blender. If they can't, load `extension/__init__.py` with
-  `importlib` and swap the changed functions into the live
-  `bl_ext.*.node_preview` module (in-memory only; gone on restart), and say
-  which checks that swap does not cover.
+  and restarts Blender. If they can't, load the changed `extension/*.py`
+  module with `importlib` and swap the changed functions into the live module
+  that defines them (`bl_ext.*.node_preview` or `bl_ext.*.node_preview.<module>`;
+  a name `__init__.py` imports from a module must be swapped in both), all
+  in-memory only (gone on restart), and say which checks that swap does not
+  cover.
 - Previews render on a timer: after setting something up, wait a moment (or
   call `bpy.ops.node.npv_refresh()` from the editor's context) before taking
   the screenshot.

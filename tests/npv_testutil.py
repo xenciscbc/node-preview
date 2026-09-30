@@ -1,5 +1,6 @@
 """Shared helpers for the headless tests (not a test module)."""
 import contextlib
+import os
 
 import bpy
 
@@ -62,3 +63,14 @@ def datablock_names():
                  "worlds", "images", "cameras", "lights"):
         out[attr] = sorted(d.name for d in getattr(bpy.data, attr))
     return out
+
+
+def addon_sources(mod):
+    """(path, text) of every .py file of the add-on under test: all modules of
+    the extension package, or the single file it was loaded from."""
+    if not hasattr(mod, "__path__"):
+        return [(mod.__file__, open(mod.__file__, encoding="utf-8").read())]
+    pkg = mod.__path__[0]
+    return [(os.path.join(pkg, fn),
+             open(os.path.join(pkg, fn), encoding="utf-8").read())
+            for fn in sorted(os.listdir(pkg)) if fn.endswith(".py")]
