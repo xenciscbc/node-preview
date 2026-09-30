@@ -3,7 +3,7 @@
 
 Reads ``node_preview_thumbnails.py`` (the legacy add-on, which carries a
 ``bl_info`` block and the version), strips ``bl_info`` to produce
-``extension/__init__.py`` (extensions use ``blender_manifest.toml`` instead),
+``extension/__init__.py`` (untracked; extensions use ``blender_manifest.toml``),
 and zips the manifest + entry file into ``dist/<id>-<ver>.zip``. ``dist/`` is
 not tracked in git: the zip is uploaded to a GitHub Release (see README).
 
