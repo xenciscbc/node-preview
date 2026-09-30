@@ -1410,12 +1410,15 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
             node = tree.nodes.get(node_name)
             out = _out_by_id(node, out_id) if node is not None else None
         # (A Viewer / File Output node has no outputs, so ``out`` survives.)
+        # Every node reading the user's scene (Render Layers, Cryptomatte)
+        # must read the copy instead: the render pipeline also renders each
+        # other scene the tree reads, at the copy's thumbnail size, which
+        # overwrote the user's Render Result and so the Viewer's input.
         for t in [tree] + copies:
             for n in list(t.nodes):
                 if n.bl_idname in ("CompositorNodeViewer", "CompositorNodeOutputFile"):
                     t.nodes.remove(n)
-                elif (n.bl_idname == "CompositorNodeRLayers"
-                      and getattr(n, "scene", None) == scene):
+                elif getattr(n, "scene", None) == scene:
                     n.scene = tmp
         if out is None:
             return None
