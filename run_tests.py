@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Run the headless test suite in Blender.
 
-Usage:  python run_tests.py [addon.py] [filter]
+Usage:  python run_tests.py [addon] [filter]
 
-``addon.py`` defaults to ``node_preview_thumbnails.py``. The Blender binary is
+``addon`` is the extension package directory (default ``extension/``) or a
+single ``.py`` file. The Blender binary is
 taken from the BLENDER environment variable, falling back to the default
 Blender 5.2 install location on Windows, then ``blender`` on PATH.
 Exits non-zero if any test fails.
@@ -14,7 +15,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_ADDON = os.path.join(HERE, "node_preview_thumbnails.py")
+DEFAULT_ADDON = os.path.join(HERE, "extension")
 RUNNER = os.path.join(HERE, "tests", "blender_runner.py")
 WIN_DEFAULT = r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
 

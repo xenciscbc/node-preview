@@ -25,21 +25,9 @@ Lights:
 Engine: EEVEE or Cycles (per preview). Updates: automatic (only the changed
 nodes re-render, visible / active nodes first), plus a manual Refresh button.
 
-Tested on Blender 5.2 (EEVEE + Cycles, Vulkan). Legacy add-on: install via
-Preferences > Add-ons > (v) Install from Disk...
+Tested on Blender 5.2 (EEVEE + Cycles, Vulkan). Blender Extension: metadata
+and version live in blender_manifest.toml next to this file.
 """
-
-
-bl_info = {
-    "name": "Node Preview Thumbnails",
-    "author": "Chun (built with Claude)",
-    "version": (1, 4, 1),
-    "blender": (5, 2, 0),
-    "location": "Shader / Geometry / Compositor editor > Sidebar (N) > Preview",
-    "description": "Live rendered thumbnail above nodes (shader/world/geometry/compositor).",
-    "warning": "",
-    "category": "Node",
-}
 
 import os
 import time
@@ -3863,8 +3851,7 @@ def _prefs_update(self, context):
 
 
 class NPVAddonPrefs(bpy.types.AddonPreferences):
-    # __name__ is the add-on's module: "node_preview_thumbnails" (legacy) or
-    # "bl_ext.<repo>.node_preview" (extension package).
+    # __name__ is the extension package: "bl_ext.<repo>.node_preview".
     bl_idname = __name__
 
     max_textures: bpy.props.IntProperty(
@@ -4065,7 +4052,3 @@ def unregister():
             bpy.utils.unregister_class(c)
         except Exception:
             pass
-
-
-if __name__ == "__main__":
-    register()

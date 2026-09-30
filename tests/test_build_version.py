@@ -6,16 +6,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import build_extension as be  # noqa: E402
 
-SRC = '"version": (1, 4, 0),'
-
-
-def _gate(tags, head="aaa", tagged=None, src=SRC, version="1.4.0"):
+def _gate(tags, head="aaa", tagged=None, version="1.4.0"):
     saved = be.release_tags, be.tag_commit, be._git
     be.release_tags = lambda: tags
     be.tag_commit = lambda v: tagged
     be._git = lambda *a: head
     try:
-        be.check_version(src, "node_preview", version)
+        be.check_version(version)
         return None
     except SystemExit as exc:
         return str(exc)
@@ -38,8 +35,9 @@ def test_own_tag_must_be_head(mod):
     assert "already tagged" in _gate(["1.3.0", "1.4.0"], head="aaa", tagged="bbb")
 
 
-def test_bl_info_must_match_manifest(mod):
-    assert "!=" in _gate([], src='"version": (1, 3, 9),')
+def test_version_must_be_x_y_z(mod):
+    assert "X.Y.Z" in _gate([], version="1.4")
+    assert "X.Y.Z" in _gate([], version="0.0.0-dev")
 
 
 def test_no_git_fails(mod):
@@ -54,12 +52,19 @@ def test_real_checkout_has_release_tags(mod):
     assert all(t.count(".") == 2 for t in tags), tags
 
 
-def test_extension_build_carries_the_note(mod):
-    src = open(be.SRC, "r", encoding="utf-8").read()
-    out = be.strip_bl_info(src)
-    assert "bl_info = {" not in out, "bl_info kept"
-    assert "# NOTE: This is the Blender Extension build." in out, \
-        "extension note not inserted"
+def test_zip_ships_the_package_without_caches(mod):
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        for rel in ("blender_manifest.toml", "__init__.py", "sub/x.py",
+                    "__pycache__/a.pyc", "sub/__pycache__/b.pyc", "y.pyc",
+                    ".hidden", ".git/config"):
+            path = os.path.join(tmp, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w").close()
+        arcs = [arc for _path, arc in be.package_files(tmp)]
+    assert arcs == ["__init__.py", "blender_manifest.toml", "sub/x.py"], arcs
+    real = [arc for _path, arc in be.package_files()]
+    assert "blender_manifest.toml" in real and "__init__.py" in real, real
 
 
 def test_manifest_strings_fit_blenders_limits(mod):

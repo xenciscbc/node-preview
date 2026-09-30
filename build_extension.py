@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Build the Blender Extension package from the single-file add-on source.
+"""Build the Blender Extension zip from the ``extension/`` package.
 
-Reads ``node_preview_thumbnails.py`` (the legacy add-on, which carries a
-``bl_info`` block and the version), strips ``bl_info`` to produce
-``extension/__init__.py`` (untracked; extensions use ``blender_manifest.toml``),
-and zips the manifest + entry file into ``dist/<id>-<ver>.zip``. ``dist/`` is
-not tracked in git: the zip is uploaded to a GitHub Release (see README).
+``extension/`` is the source: ``blender_manifest.toml`` (metadata and the
+version) plus the add-on's Python files. They are zipped into
+``dist/<id>-<ver>.zip``. ``dist/`` is not tracked in git: the zip is uploaded
+to a GitHub Release (see README).
 
 Release gate -- nothing is written unless every step passes:
-  1. bl_info version == manifest version, and it is newer than every release
-     tag (``vX.Y.Z``) in git. If ``v<version>`` itself already exists it must
-     point at HEAD (rebuilding that release), not at another commit.
-  2. The headless test suite (run_tests.py) passes against the stripped
-     extension code, i.e. exactly what ships.
+  1. The manifest version is newer than every release tag (``vX.Y.Z``) in
+     git. If ``v<version>`` itself already exists it must point at HEAD
+     (rebuilding that release), not at another commit.
+  2. The headless test suite (run_tests.py) passes against ``extension/``.
   3. ``blender --command extension validate`` accepts the zip.
 
 Usage:  python build_extension.py [--no-test]
@@ -28,7 +26,6 @@ import zipfile
 import run_tests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "node_preview_thumbnails.py")
 EXT_DIR = os.path.join(HERE, "extension")
 DIST_DIR = os.path.join(HERE, "dist")
 MANIFEST = os.path.join(EXT_DIR, "blender_manifest.toml")
@@ -70,20 +67,16 @@ def tag_commit(version):
     return _git("rev-parse", "--verify", "--quiet", "v%s^{commit}" % version)
 
 
-def check_version(src, ext_id, version):
-    m = re.search(r'"version"\s*:\s*\((\d+),\s*(\d+),\s*(\d+)\)', src)
-    if not m:
-        fail("no version in bl_info")
-    bl_version = ".".join(m.groups())
-    if bl_version != version:
-        fail("bl_info version %s != manifest version %s" % (bl_version, version))
+def check_version(version):
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        fail("manifest version %r is not X.Y.Z" % version)
     tags = release_tags()
     if tags is None:
         fail("can't list git tags (run from a git checkout with git on PATH)")
     newest = max((t for t in tags if t != version), key=_vtuple, default=None)
     if newest and _vtuple(version) <= _vtuple(newest):
         fail("version %s is not newer than the release tag v%s "
-             "(bump bl_info and the manifest)" % (version, newest))
+             "(bump the manifest version)" % (version, newest))
     if version in tags and tag_commit(version) != _git("rev-parse", "HEAD"):
         fail("v%s is already tagged on another commit; bump the version "
              "(or check out v%s to rebuild that release)" % (version, version))
@@ -92,16 +85,19 @@ def check_version(src, ext_id, version):
               "is a fresh clone")
 
 
-def strip_bl_info(src):
-    # Replace the bl_info = { ... } block with a note: extensions use the
-    # manifest instead.
-    note = ("\n# NOTE: This is the Blender Extension build. Metadata lives in\n"
-            "# blender_manifest.toml (no bl_info needed for extensions).\n")
-    stripped, n = re.subn(r"\nbl_info\s*=\s*\{.*?\n\}\n", lambda _m: note, src,
-                          count=1, flags=re.DOTALL)
-    if n != 1:
-        fail("could not find a bl_info block to strip")
-    return stripped
+def package_files(src_dir=EXT_DIR):
+    """(path on disk, path in the zip) of every file that ships: everything
+    under ``src_dir`` except caches and hidden files, sorted."""
+    out = []
+    for root, dirs, files in os.walk(src_dir):
+        dirs[:] = sorted(d for d in dirs
+                         if d != "__pycache__" and not d.startswith("."))
+        for fn in sorted(files):
+            if fn.startswith(".") or fn.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, fn)
+            out.append((path, os.path.relpath(path, src_dir).replace(os.sep, "/")))
+    return out
 
 
 def validate_zip(zip_path):
@@ -116,32 +112,25 @@ def validate_zip(zip_path):
 
 def main():
     skip_tests = "--no-test" in sys.argv[1:]
-    src = open(SRC, "r", encoding="utf-8").read()
     manifest_text = open(MANIFEST, "r", encoding="utf-8").read()
     ext_id = read_field(manifest_text, "id", "node_preview")
     version = read_field(manifest_text, "version", "0.0.0")
 
-    check_version(src, ext_id, version)
-    stripped = strip_bl_info(src)
+    check_version(version)
+
+    if skip_tests:
+        print("WARNING: tests skipped (--no-test)")
+    elif run_tests.run(EXT_DIR) != 0:
+        fail("tests failed; nothing was written")
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_init = os.path.join(tmp, "__init__.py")
-        open(tmp_init, "w", encoding="utf-8").write(stripped)
-
-        if skip_tests:
-            print("WARNING: tests skipped (--no-test)")
-        elif run_tests.run(tmp_init) != 0:
-            fail("tests failed; nothing was written")
-
         tmp_zip = os.path.join(tmp, "%s-%s.zip" % (ext_id, version))
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(MANIFEST, "blender_manifest.toml")
-            z.write(tmp_init, "__init__.py")
+            for path, arc in package_files():
+                z.write(path, arc)
         validate_zip(tmp_zip)
 
-        os.makedirs(EXT_DIR, exist_ok=True)
         os.makedirs(DIST_DIR, exist_ok=True)
-        open(os.path.join(EXT_DIR, "__init__.py"), "w", encoding="utf-8").write(stripped)
         zip_path = os.path.join(DIST_DIR, os.path.basename(tmp_zip))
         shutil.copyfile(tmp_zip, zip_path)
 
