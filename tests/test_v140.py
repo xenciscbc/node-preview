@@ -55,17 +55,17 @@ def _math(nt, op, a, b):
 def _render_value(mod, mat):
     """Render node 'Src' through the real loader; returns (value, pixels)."""
     got = []
-    orig = mod._png_to_texture
+    orig = mod.preview_scene._png_to_texture
 
     def spy(path):
-        got.append(mod._load_render(path))
+        got.append(mod.preview_scene._load_render(path))
         return True
 
-    mod._png_to_texture = spy
+    mod.preview_scene._png_to_texture = spy
     try:
         assert mod.render_shader(mat, "Src", 32, _props())
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
     w, h, px, value = got[0]
     assert len(px) == w * h * 4
     return value, px
@@ -257,14 +257,14 @@ def test_load_render_matches_pixels(mod):
     mat = _emission_material("NPV_t140_px", lambda nt: nt.nodes.new("ShaderNodeTexChecker").outputs[0])
     try:
         path = []
-        orig = mod._png_to_texture
-        mod._png_to_texture = lambda p: path.append(p) or True
+        orig = mod.preview_scene._png_to_texture
+        mod.preview_scene._png_to_texture = lambda p: path.append(p) or True
         try:
             mod.render_shader(mat, mat.node_tree.nodes[0].name, 32, _props())
         finally:
-            mod._png_to_texture = orig
+            mod.preview_scene._png_to_texture = orig
         ref = load_pixels(path[0])
-        w, h, px, value = mod._load_render(path[0])
+        w, h, px, value = mod.preview_scene._load_render(path[0])
         assert value is None
         assert len(px) == len(ref) == w * h * 4
         assert max(abs(a - b) for a, b in zip(px, ref)) < 1e-6
@@ -319,13 +319,13 @@ def test_process_queue_stores_the_value(mod):
     mat = _emission_material("NPV_t140_pq", lambda nt: _math(nt, "ADD", 1.5, 0.25))
     props = _props()
     props.only_tex_shader = False
-    orig = mod._png_to_texture
+    orig = mod.preview_scene._png_to_texture
 
     def fake(path):
-        mod._state["last_value"] = mod._load_render(path)[3]
+        mod._state["last_value"] = mod.preview_scene._load_render(path)[3]
         return object()
 
-    mod._png_to_texture = fake
+    mod.preview_scene._png_to_texture = fake
     try:
         _clear(mod)
         mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
@@ -335,7 +335,7 @@ def test_process_queue_stores_the_value(mod):
         vals = list(mod._state["values"].values())
         assert len(vals) == 1 and abs(vals[0] - 1.75) < 1e-3, vals
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
         props.only_tex_shader = True
         _clear(mod)
         bpy.data.materials.remove(mat)
@@ -352,12 +352,12 @@ def test_compositor_render_is_png_even_if_scene_saves_exr(mod):
     tree.links.new(rgb.outputs[0], go.inputs[0])
     scn.render.image_settings.file_format = "OPEN_EXR"
     paths = []
-    orig = mod._png_to_texture
-    mod._png_to_texture = lambda p: paths.append(p) or True
+    orig = mod.preview_scene._png_to_texture
+    mod.preview_scene._png_to_texture = lambda p: paths.append(p) or True
     try:
         assert mod.render_compositor(scn, "RGB", 32, _props())
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
         bpy.data.scenes.remove(scn)
         bpy.data.node_groups.remove(tree)
     assert paths[0].endswith(".png"), paths

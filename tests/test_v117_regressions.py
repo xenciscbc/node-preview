@@ -23,7 +23,7 @@ def _rendered_vertex_counts(mod, run):
     """Run ``run()`` and record the evaluated vertex count of every non-preview
     mesh object in the preview scene at render time."""
     counts = []
-    orig = mod._render_scene
+    orig = mod.preview_scene._render_scene
 
     def spy(scn):
         vl = scn.view_layers[0]
@@ -35,13 +35,13 @@ def _rendered_vertex_counts(mod, run):
                     counts.append(len(o.evaluated_get(dg).data.vertices))
         raise RuntimeError("stop")
 
-    mod._render_scene = spy
+    mod.preview_scene._render_scene = spy
     try:
         run()
     except RuntimeError:
         pass
     finally:
-        mod._render_scene = orig
+        mod.preview_scene._render_scene = orig
     return counts
 
 
@@ -132,14 +132,14 @@ def test_compositor_preview_uses_low_samples(mod):
     scene.compositing_node_group = tree
     saved = (scene.render.engine, scene.cycles.samples, scene.eevee.taa_render_samples)
     seen = []
-    orig = mod._render_scene
+    orig = mod.preview_scene._render_scene
 
     def spy(s):
         seen.append((s.render.engine, s.cycles.samples, s.eevee.taa_render_samples,
                      s.render.use_motion_blur))
         raise RuntimeError("stop")
 
-    mod._render_scene = spy
+    mod.preview_scene._render_scene = spy
     try:
         for engine in ("CYCLES", "BLENDER_EEVEE"):
             scene.render.engine = engine
@@ -151,7 +151,7 @@ def test_compositor_preview_uses_low_samples(mod):
             except RuntimeError:
                 pass
     finally:
-        mod._render_scene = orig
+        mod.preview_scene._render_scene = orig
         scene.render.engine, scene.cycles.samples, scene.eevee.taa_render_samples = saved
         scene.render.use_motion_blur = False
         scene.compositing_node_group = None

@@ -76,12 +76,12 @@ def test_value_swatch_exr_still_written_quietly(mod):
     nt.links.new(m.outputs[0], emit.inputs["Color"])
     nt.links.new(emit.outputs[0], out.inputs["Surface"])
     got = []
-    orig = mod._png_to_texture
-    mod._png_to_texture = lambda p: got.append(mod._load_render(p)) or True
+    orig = mod.preview_scene._png_to_texture
+    mod.preview_scene._png_to_texture = lambda p: got.append(mod.preview_scene._load_render(p)) or True
     try:
         ok, text = _capture_fds(lambda: mod.render_shader(mat, "Src", 16, bpy.context.scene.npv))
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
         bpy.data.materials.remove(mat)
     assert ok and got, "EXR swatch render failed"
     assert "Saved:" not in text, text[-300:]

@@ -187,7 +187,7 @@ def test_geometry_node_inside_group(mod):
     ob.modifiers.new("GN", "NODES").node_group = root
     props = bpy.context.scene.npv
     counts = []
-    orig = mod._render_scene
+    orig = mod.preview_scene._render_scene
 
     def spy(scn):
         with bpy.context.temp_override(scene=scn, view_layer=scn.view_layers[0]):
@@ -204,10 +204,10 @@ def test_geometry_node_inside_group(mod):
         items = [it for it in mod._state["queue"] if it["node"] == "Inner Grid"]
         assert items, "inner geometry node not queued: %r" % [i["node"] for i in mod._state["queue"]]
         mod._state["queue"][:] = items
-        mod._render_scene = spy
+        mod.preview_scene._render_scene = spy
         mod.process_queue(props)
     finally:
-        mod._render_scene = orig
+        mod.preview_scene._render_scene = orig
         _clear_state(mod)
         bpy.data.objects.remove(ob)
         bpy.data.meshes.remove(me)

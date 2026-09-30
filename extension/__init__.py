@@ -33,17 +33,14 @@ import importlib
 import os
 import sys
 import time
-import shutil
 import hashlib
 
 import bpy
-import bmesh
 from bpy.app.handlers import persistent
 import gpu
 import blf
 from mathutils import Vector
 import numpy as np
-from gpu.types import GPUTexture, Buffer
 from gpu_extras.batch import batch_for_shader
 
 # Split-out modules, in dependency order (a module only imports from those
@@ -52,16 +49,18 @@ from gpu_extras.batch import batch_for_shader
 # in place (development) and the add-on is re-enabled, or on Reload Scripts,
 # Blender reloads only this file: reload them first so they don't keep
 # running the old code. On the first load none of them is in sys.modules yet.
-_SUBMODULES = ("common", "eligibility", "hashing", "i18n")
+_SUBMODULES = ("common", "eligibility", "hashing", "i18n", "preview_scene",
+               "sources")
 for _name in _SUBMODULES:
     _mod = sys.modules.get("%s.%s" % (__name__, _name))
     if _mod is not None:
         importlib.reload(_mod)
 del _name, _mod
 
-# Their names are imported here because the code below uses them as globals;
-# none of them is replaced by a test (see tests/test_package_layout.py), so a
-# plain name import is safe.
+# The code below uses their names as globals, imported here. A function that
+# tests replace (mod.<module>.<name> = fake) is never imported by name: it is
+# called through its module (preview_scene._render_scene(...)) so the
+# replacement reaches every caller. tests/test_package_layout.py checks this.
 from .common import (
     KIND_SHADER, KIND_GEO, KIND_COMP, KIND_WORLD, KINDS, PREVIEW_PREV_WORLD,
     space_kind, PREVIEW_SCENE, PREVIEW_PLANE, PREVIEW_SPHERE, PREVIEW_CUBE,
@@ -71,300 +70,16 @@ from .common import (
 )
 from .eligibility import (
     _previewable_outputs, _out_by_id, _preview_targets, _socket_enum_cache,
-    _enum_num, _npv_socket_items, _zone_cache, _in_zone, node_eligible,
-    renders_as_shader,
+    _npv_socket_items, _zone_cache, _in_zone, node_eligible, renders_as_shader,
 )
 from .hashing import (
     _socket_default, _SKIP_PROPS, _plain, _STRUCT_SKIP, _simple_props_sig,
     upstream_hash, _isolated_hash, tree_signature,
 )
 from .i18n import TR, _t
-
-# --------------------------------------------------------------------------- #
-#  Preview scene
-# --------------------------------------------------------------------------- #
-def _new_uv_mesh(name, build):
-    """Mesh built by ``build(bm)`` with a UV layer. bmesh ``calc_uvs`` only
-    fills an existing UV layer; it never creates one."""
-    me = bpy.data.meshes.new(name)
-    bm = bmesh.new()
-    bm.loops.layers.uv.new("UVMap")
-    build(bm)
-    bm.to_mesh(me)
-    bm.free()
-    return me
-
-
-def _drop_if_no_uv(obj):
-    """Remove a preview object left by an older version without UVs (image
-    textures would sample a single texel); returns None so it gets rebuilt."""
-    if obj is None or getattr(obj.data, "uv_layers", None):
-        return obj
-    me = obj.data
-    bpy.data.objects.remove(obj)
-    if me is not None and me.users == 0:
-        bpy.data.meshes.remove(me)
-    return None
-
-
-_env_enum_cache = []
-
-
-def _env_dir():
-    try:
-        return bpy.utils.system_resource("DATAFILES", path="studiolights/world") or ""
-    except Exception:
-        return ""
-
-
-def _env_items(self, context):
-    """'Uniform' plus Blender's bundled studio-light HDRIs."""
-    items = [("UNIFORM", "Uniform", "Even white environment (World Light sets "
-              "its strength)", 0)]
-    d = _env_dir()
-    try:
-        files = sorted(f for f in os.listdir(d)
-                       if f.lower().endswith((".exr", ".hdr")))
-    except OSError:
-        files = []
-    used = {0}
-    for f in files:
-        label = os.path.splitext(f)[0].replace("_", " ").title()
-        items.append((f, label, "Light the preview with Blender's '%s' HDRI" % label,
-                      _enum_num(f, used)))
-    _env_enum_cache[:] = items
-    return items
-
-
-def _env_image(filename):
-    """The bundled HDRI ``filename`` as an image (loaded once), or None."""
-    name = ENV_IMAGE_PREFIX + filename
-    img = bpy.data.images.get(name)
-    if img is not None:
-        return img
-    path = os.path.join(_env_dir(), filename)
-    if not os.path.isfile(path):
-        return None
-    try:
-        img = bpy.data.images.load(path, check_existing=False)
-    except RuntimeError:
-        return None
-    img.name = name
-    return img
-
-
-def _setup_env(wnt, bg, env, world_strength):
-    """Feed the preview world's Background from a bundled HDRI, or white."""
-    tex = wnt.nodes.get("NPV_env")
-    img = _env_image(env) if env and env != "UNIFORM" else None
-    if img is None:
-        if tex is not None:
-            wnt.nodes.remove(tex)
-        bg.inputs[0].default_value = (1, 1, 1, 1)
-    else:
-        if tex is None:
-            tex = wnt.nodes.new("ShaderNodeTexEnvironment")
-            tex.name = "NPV_env"
-        tex.image = img
-        if not bg.inputs[0].is_linked:
-            wnt.links.new(tex.outputs["Color"], bg.inputs[0])
-    bg.inputs[1].default_value = world_strength
-
-
-def ensure_preview_scene(res, world_strength=1.0, sun_strength=2.0,
-                         engine="BLENDER_EEVEE", env="UNIFORM"):
-    scn = bpy.data.scenes.get(PREVIEW_SCENE)
-    if scn is None:
-        scn = bpy.data.scenes.new(PREVIEW_SCENE)
-    # Render at the user's current frame (animated geometry, drivers, keyed
-    # material values), not the preview scene's own frame 1.
-    user_scene = bpy.context.scene
-    if user_scene is not None and user_scene != scn:
-        scn.frame_current = user_scene.frame_current
-    try:
-        scn.render.engine = engine
-    except TypeError:
-        scn.render.engine = "BLENDER_EEVEE"
-    if scn.render.engine == "CYCLES":
-        try:
-            scn.cycles.samples = 16
-            scn.cycles.use_denoising = True
-        except Exception:
-            pass
-    r = scn.render
-    r.resolution_x = res
-    r.resolution_y = res
-    r.resolution_percentage = 100
-    r.film_transparent = True
-    r.use_compositing = False
-    r.use_sequencer = False
-    r.image_settings.file_format = "PNG"
-    r.image_settings.color_mode = "RGBA"
-    r.image_settings.color_depth = "8"
-    try:
-        scn.view_settings.view_transform = "Standard"
-        scn.display_settings.display_device = "sRGB"
-    except Exception:
-        pass
-
-    if scn.world is None:
-        scn.world = bpy.data.worlds.get("NPV_world") or bpy.data.worlds.new("NPV_world")
-    wnt = scn.world.node_tree
-    bg = next((n for n in wnt.nodes if n.bl_idname == "ShaderNodeBackground"), None)
-    if bg is None:
-        bg = wnt.nodes.new("ShaderNodeBackground")
-        wout = next((n for n in wnt.nodes if n.bl_idname == "ShaderNodeOutputWorld"), None) \
-            or wnt.nodes.new("ShaderNodeOutputWorld")
-        wnt.links.new(bg.outputs[0], wout.inputs["Surface"])
-    _setup_env(wnt, bg, env, world_strength)
-
-    plane = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_PLANE))
-    if plane is None:
-        me = _new_uv_mesh(PREVIEW_PLANE + "_mesh", lambda bm: bmesh.ops.create_grid(
-            bm, x_segments=1, y_segments=1, size=1.0, calc_uvs=True))
-        plane = bpy.data.objects.new(PREVIEW_PLANE, me)
-    if plane.name not in scn.collection.objects:
-        scn.collection.objects.link(plane)
-    plane.location = (0, 0, 0)
-    plane.rotation_euler = (0, 0, 0)
-    plane.scale = (1.04, 1.04, 1.0)
-
-    sphere = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_SPHERE))
-    if sphere is None:
-        me = _new_uv_mesh(PREVIEW_SPHERE + "_mesh", lambda bm: bmesh.ops.create_uvsphere(
-            bm, u_segments=48, v_segments=24, radius=0.92, calc_uvs=True))
-        for poly in me.polygons:
-            poly.use_smooth = True
-        sphere = bpy.data.objects.new(PREVIEW_SPHERE, me)
-    if sphere.name not in scn.collection.objects:
-        scn.collection.objects.link(sphere)
-    sphere.location = (0, 0, 0)
-
-    cube = _drop_if_no_uv(bpy.data.objects.get(PREVIEW_CUBE))
-    if cube is None:
-        me = _new_uv_mesh(PREVIEW_CUBE + "_mesh", lambda bm: bmesh.ops.create_cube(
-            bm, size=1.0, calc_uvs=True))
-        cube = bpy.data.objects.new(PREVIEW_CUBE, me)
-    if cube.name not in scn.collection.objects:
-        scn.collection.objects.link(cube)
-    cube.location = (0, 0, 0)
-    # Tilted so three faces show (a cube seen face-on reads as a square).
-    cube.rotation_euler = (0.7854, 0.6155, 0.0)   # isometric: 3 faces equal
-    cube.scale = (0.98, 0.98, 0.98)
-    cube.hide_render = True      # only render_shader's Cube shape shows it
-
-    cam = bpy.data.objects.get(PREVIEW_CAM)
-    if cam is None:
-        cd = bpy.data.cameras.new(PREVIEW_CAM + "_data")
-        cam = bpy.data.objects.new(PREVIEW_CAM, cd)
-    if cam.name not in scn.collection.objects:
-        scn.collection.objects.link(cam)
-    cam.data.type = "ORTHO"
-    cam.data.ortho_scale = 2.0
-    cam.location = (0, 0, 2)
-    cam.rotation_euler = (0, 0, 0)
-    scn.camera = cam
-
-    sun = bpy.data.objects.get(PREVIEW_SUN)
-    if sun is None:
-        sd = bpy.data.lights.new(PREVIEW_SUN + "_data", type="SUN")
-        sun = bpy.data.objects.new(PREVIEW_SUN, sd)
-    if sun.name not in scn.collection.objects:
-        scn.collection.objects.link(sun)
-    sun.data.type = "SUN"
-    sun.data.energy = sun_strength
-    sun.rotation_euler = (0.9, 0.15, 0.5)
-    return scn, plane, sphere
-
-
-def _linear_to_srgb(v):
-    v = np.clip(v, 0.0, 1.0)
-    return np.where(v <= 0.0031308, v * 12.92,
-                    1.055 * np.power(v, 1.0 / 2.4) - 0.055)
-
-
-def _load_render(path):
-    """Read a preview render back: (width, height, float32 RGBA pixels ready
-    to display, number or None). ``foreach_get`` into a numpy array is far
-    faster than ``img.pixels[:]`` (a Python list of w*h*4 floats).
-
-    A '.exr' render is a Value swatch encoded by _value_emission(): scene-
-    linear R = max(v, 0), G = max(-v, 0). It is shown as the grey the PNG path
-    would give (Standard view = sRGB, clipped) and, when every pixel holds the
-    same number, that number is returned for drawing on the thumbnail."""
-    img = bpy.data.images.load(path, check_existing=False)
-    try:
-        w, h = img.size
-        if w == 0 or h == 0:
-            return None
-        px = np.empty(w * h * 4, dtype=np.float32)
-        img.pixels.foreach_get(px)
-    finally:
-        bpy.data.images.remove(img)
-    value = None
-    if path.lower().endswith(".exr"):
-        px = px.reshape(-1, 4)
-        a = px[:, 3]
-        solid = a > 0.5
-        r = np.where(a > 1e-6, px[:, 0] / np.maximum(a, 1e-6), 0.0)
-        g = np.where(a > 1e-6, px[:, 1] / np.maximum(a, 1e-6), 0.0)
-        if solid.any():
-            v = (r - g)[solid]
-            lo, hi = float(v.min()), float(v.max())
-            if hi - lo <= 1e-3 * max(1.0, abs(hi), abs(lo)):
-                value = float(v.mean())
-        grey = _linear_to_srgb(r).astype(np.float32)
-        px = np.stack([grey, grey, grey, a], axis=1).reshape(-1)
-    return w, h, np.ascontiguousarray(px, dtype=np.float32), value
-
-
-def _png_to_texture(path):
-    got = _load_render(path)
-    if got is None:
-        return None
-    w, h, px, value = got
-    _state["last_value"] = value
-    buf = Buffer("FLOAT", w * h * 4, px)
-    return GPUTexture((w, h), format="RGBA16F", data=buf)
-
-
-def _finish(path):
-    """Hand a finished render on: to the thumbnail cache, or -- while the
-    Export operator runs -- copied to the chosen file."""
-    dst = _state.get("export_to")
-    if dst:
-        shutil.copyfile(path, dst)
-        return True
-    return _png_to_texture(path)
-
-
-def _render_scene(scn):
-    ext = ".exr" if scn.render.image_settings.file_format == "OPEN_EXR" else ".png"
-    path = os.path.join(bpy.app.tempdir, "npv_render" + ext)
-    # The previous preview's file must not pass for this one if the render
-    # writes nothing.
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    scn.render.filepath = path
-    # Override only the scene: adding a window makes render report FINISHED
-    # without writing the file.
-    with bpy.context.temp_override(scene=scn):
-        bpy.ops.render.render(write_still=False)
-    # Save the result ourselves: write_still=True logs a "Saved: '...'" line
-    # to the console for every thumbnail, burying real errors. save_render
-    # with the scene applies its colour management and file format, so the
-    # file is identical to what write_still wrote.
-    img = next((i for i in bpy.data.images if i.type == "RENDER_RESULT"), None) \
-        or bpy.data.images.get("Render Result")
-    if img is None:
-        raise RuntimeError("render produced no Render Result")
-    img.save_render(path, scene=scn)
-    if not os.path.isfile(path):
-        raise RuntimeError("render finished without writing %s" % path)
-    return path
-
+from . import preview_scene, sources
+from .preview_scene import _env_items, ensure_preview_scene, _finish
+from .sources import _idref, _idget, resolve_source, _tree_by_pointer
 
 # --------------------------------------------------------------------------- #
 #  Renderers
@@ -622,7 +337,7 @@ def render_shader(src_mat, node_name, res, props, out_id=None, chain=None):
                 o.hide_render = o is not obj
         obj.data.materials.clear()
         obj.data.materials.append(prev)
-        return _finish(_render_scene(scn))
+        return _finish(preview_scene._render_scene(scn))
     finally:
         try:
             bpy.data.materials.remove(prev)
@@ -745,7 +460,7 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=No
                 slot.material = mat
         obj2.hide_render = False
         _frame_object(scn, scn.camera, obj2)
-        return _finish(_render_scene(scn))
+        return _finish(preview_scene._render_scene(scn))
     finally:
         try:
             if obj2.name in scn.collection.objects:
@@ -858,7 +573,7 @@ def render_geo_swatch(obj, node_name, res, props, out_id=None, tree=None):
         plane.hide_render = False
         plane.data.materials.clear()
         plane.data.materials.append(m)
-        return _finish(_render_scene(scn))
+        return _finish(preview_scene._render_scene(scn))
     finally:
         try:
             bpy.data.materials.remove(m)
@@ -983,7 +698,7 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
                 tmp.eevee.taa_render_samples = min(tmp.eevee.taa_render_samples, 16)
         except Exception:
             pass
-        return _finish(_render_scene(tmp))
+        return _finish(preview_scene._render_scene(tmp))
     finally:
         try:
             bpy.data.scenes.remove(tmp)
@@ -1099,7 +814,7 @@ def render_world(world, node_name, res, props, out_id=None, chain=None):
                 cd.type = "PERSP"
                 cd.lens = 12.0
                 cam.rotation_euler = (1.3, 0.0, 0.0)
-        return _finish(_render_scene(scn))
+        return _finish(preview_scene._render_scene(scn))
     finally:
         scn.world = saved_world
         cd.type, cd.lens, cam.location, cam.rotation_euler, \
@@ -1125,129 +840,6 @@ def render_world(world, node_name, res, props, out_id=None, chain=None):
         except Exception:
             pass
         _remove_groups(copies)
-
-
-# --------------------------------------------------------------------------- #
-#  Source resolution
-# --------------------------------------------------------------------------- #
-def find_material_for_tree(tree):
-    for m in bpy.data.materials:
-        if m.node_tree is not None and m.node_tree == tree:
-            return m
-    return None
-
-
-def _idref(d):
-    """How a queue item / hint refers to a data-block: its name, or (name,
-    library path) for linked data, which can share a local data-block's name."""
-    if d.library is None:
-        return d.name
-    return (d.name, d.library.filepath)
-
-
-def _idget(collection, ref):
-    """The data-block ``ref`` (from _idref) names in ``collection``, or None.
-    A plain name only matches local data."""
-    if not ref:
-        return None
-    name, lib = (ref, None) if isinstance(ref, str) else ref
-    d = collection.get(name)
-    if d is not None and (d.library.filepath if d.library else None) == lib:
-        return d
-    return next((d for d in collection if d.name == name
-                 and (d.library.filepath if d.library else None) == lib), None)
-
-
-def _hinted(cls, collection):
-    """Data-blocks of ``cls`` the editor was last seen showing (its id /
-    id_from and the active object), most specific first."""
-    out = []
-    for c, name in _state.get("src_hint") or ():
-        if c == cls:
-            d = _idget(collection, name)
-            if d is not None and d not in out:
-                out.append(d)
-    return out
-
-
-def _uses_geo_tree(obj, tree):
-    return any(mo.type == 'NODES' and mo.node_group == tree for mo in obj.modifiers)
-
-
-def resolve_source(tree, kind):
-    """The data-block a tree is previewed through. Several can share a tree
-    (a material on many objects is fine; a GN tree on several objects is
-    not): prefer the one the editor shows, then fall back to the first."""
-    if kind == KIND_SHADER:
-        for m in _hinted("MAT", bpy.data.materials):
-            if m.node_tree is not None and m.node_tree == tree:
-                return ("MAT", _idref(m))
-        m = find_material_for_tree(tree)
-        if m:
-            return ("MAT", _idref(m))
-        for lt in _hinted("LIGHT", bpy.data.lights) + list(bpy.data.lights):
-            if getattr(lt, "node_tree", None) is not None and lt.node_tree == tree:
-                return ("LIGHT", _idref(lt))
-        return None
-    if kind == KIND_GEO:
-        for obj in _hinted("OBJ", bpy.data.objects) + list(bpy.data.objects):
-            if _uses_geo_tree(obj, tree):
-                return ("OBJ", _idref(obj))
-        return None
-    if kind == KIND_COMP:
-        for s in bpy.data.scenes:
-            if getattr(s, "compositing_node_group", None) == tree:
-                return ("SCENE", _idref(s))
-        return None
-    if kind == KIND_WORLD:
-        for w in bpy.data.worlds:
-            if w.node_tree is not None and w.node_tree == tree:
-                return ("WORLD", _idref(w))
-        return None
-    return None
-
-
-def _tree_by_pointer(ptr):
-    """A live node tree (material / world tree or node group) by pointer."""
-    for m in bpy.data.materials:
-        if m.node_tree is not None and m.node_tree.as_pointer() == ptr:
-            return m.node_tree
-    for w in bpy.data.worlds:
-        if w.node_tree is not None and w.node_tree.as_pointer() == ptr:
-            return w.node_tree
-    for lt in bpy.data.lights:
-        nt = getattr(lt, "node_tree", None)
-        if nt is not None and nt.as_pointer() == ptr:
-            return nt
-    for ng in bpy.data.node_groups:
-        if ng.as_pointer() == ptr:
-            return ng
-    return None
-
-
-def _resolve_active():
-    """(edited tree, kind, editor path) recorded by the last draw."""
-    kind = _state["active_kind"]
-    ptrs = _state["active_path"] or (
-        [_state["active_tree_ptr"]] if _state["active_tree_ptr"] else [])
-    if not ptrs or kind is None:
-        return None, None, None
-    path = [_tree_by_pointer(p) for p in ptrs]
-    if any(t is None for t in path):
-        return None, None, None
-    return path[-1], kind, path
-
-
-def _kind_enabled(kind, props):
-    if kind == KIND_SHADER:
-        return True
-    if kind == KIND_WORLD:
-        return props.preview_world
-    if kind == KIND_GEO:
-        return props.preview_geometry
-    if kind == KIND_COMP:
-        return props.preview_compositor
-    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1794,7 +1386,7 @@ def _queue_allowed(item, props):
     """False for a pending render whose preview type was switched off since
     it was queued (Compositor, Geometry Nodes, World, compositor groups)."""
     kind = item.get("kind")
-    if kind is not None and not _kind_enabled(kind, props):
+    if kind is not None and not sources._kind_enabled(kind, props):
         return False
     if kind == KIND_COMP and item.get("chain") \
             and not getattr(props, "comp_groups", True):
@@ -1939,7 +1531,7 @@ def _editor_targets():
     _prune_editors()
     props = _get_props()
     eds = [e for e in _state["editors"].values()
-           if props is None or _kind_enabled(e["kind"], props)]
+           if props is None or sources._kind_enabled(e["kind"], props)]
     # Editors on the same tree through different sources (pinned to another
     # object, a group entered from another material) each get their own
     # thumbnails: the source is part of the cache key (_view_ctx).
@@ -1954,7 +1546,7 @@ def _editor_targets():
         seen.add(sig)
         out.append((path[-1], e["kind"], path, e["hint"]))
     if not out:
-        tree, kind, path = _resolve_active()
+        tree, kind, path = sources._resolve_active()
         out.append((tree, kind, path, _state["src_hint"]))
     return out
 
@@ -1983,7 +1575,7 @@ def _timer():
         saved_hint = _state["src_hint"]
         try:
             for tree, kind, path, hint in _editor_targets():
-                if tree is not None and _kind_enabled(kind, props):
+                if tree is not None and sources._kind_enabled(kind, props):
                     _state["src_hint"] = hint
                     rebuild_queue(tree, kind, props, force=False, path=path)
         finally:
@@ -2383,7 +1975,7 @@ def draw_callback():
         return
     kind = space_kind(space)
     props = getattr(ctx.scene, "npv", None)
-    if props is None or not props.enabled or not _kind_enabled(kind, props):
+    if props is None or not props.enabled or not sources._kind_enabled(kind, props):
         _forget_editor(space)
         return
     tree = getattr(space, "edit_tree", None)

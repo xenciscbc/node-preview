@@ -26,9 +26,9 @@ def test_cache_is_pruned_right_after_renders_over_the_limit(mod):
     st = mod._state
     props = _props()
     mat = bpy.data.materials.new("NPV_tl_prune")
-    orig = mod._max_textures, mod.process_queue, mod._resolve_active
+    orig = mod._max_textures, mod.process_queue, mod.sources._resolve_active
     mod._max_textures = lambda: 4
-    mod._resolve_active = lambda: (None, None, None)
+    mod.sources._resolve_active = lambda: (None, None, None)
     tree = mat.node_tree
 
     def render_some(p):
@@ -47,7 +47,7 @@ def test_cache_is_pruned_right_after_renders_over_the_limit(mod):
             assert len(st["textures"]) <= 4, \
                 "cache over its limit between prunes: %d (#40)" % len(st["textures"])
     finally:
-        mod._max_textures, mod.process_queue, mod._resolve_active = orig
+        mod._max_textures, mod.process_queue, mod.sources._resolve_active = orig
         _clear(mod)
         bpy.data.materials.remove(mat)
 

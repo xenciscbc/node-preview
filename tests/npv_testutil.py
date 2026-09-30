@@ -43,17 +43,17 @@ def capture_renders(mod):
     background mode) with one that records the rendered pixels. Yields the
     list of captured pixel arrays; renderers return a truthy marker."""
     shots = []
-    orig = mod._png_to_texture
+    orig = mod.preview_scene._png_to_texture
 
     def fake(path):
         shots.append(load_pixels(path))
         return len(shots)
 
-    mod._png_to_texture = fake
+    mod.preview_scene._png_to_texture = fake
     try:
         yield shots
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
 
 
 def datablock_names():

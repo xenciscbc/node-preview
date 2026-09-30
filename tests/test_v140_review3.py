@@ -24,12 +24,12 @@ def _comp_scene(name):
 
 def _render_comp(mod, scn):
     paths = []
-    orig = mod._png_to_texture
-    mod._png_to_texture = lambda p: paths.append(p) or True
+    orig = mod.preview_scene._png_to_texture
+    mod.preview_scene._png_to_texture = lambda p: paths.append(p) or True
     try:
         ok = mod.render_compositor(scn, "RGB", 16, _props())
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
     return ok, paths
 
 

@@ -87,7 +87,7 @@ def test_timer_redraws_after_dropping_thumbnails(mod):
     scene.compositing_node_group = tree
     st = mod._state
     calls = []
-    orig = (mod._tag_node_editors, mod._resolve_active, mod._kind_enabled,
+    orig = (mod._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
             props.enabled, props.auto_update, props.comp_groups)
     try:
         for k in ("textures", "hashes", "queue", "queued_keys"):
@@ -96,14 +96,14 @@ def test_timer_redraws_after_dropping_thumbnails(mod):
         props.enabled = props.auto_update = True
         props.comp_groups = False
         mod._tag_node_editors = lambda: calls.append(1)
-        mod._resolve_active = lambda: (grp, mod.KIND_COMP, [tree, grp])
-        mod._kind_enabled = lambda kind, p: True
+        mod.sources._resolve_active = lambda: (grp, mod.KIND_COMP, [tree, grp])
+        mod.sources._kind_enabled = lambda kind, p: True
         st["dirty"] = True
         mod._timer()
         assert not st["textures"], "group thumbnail not dropped"
         assert calls, "thumbnails dropped without redrawing the node editors"
     finally:
-        (mod._tag_node_editors, mod._resolve_active, mod._kind_enabled,
+        (mod._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
          props.enabled, props.auto_update, props.comp_groups) = orig
         for k in ("textures", "hashes", "queue", "queued_keys"):
             st[k].clear()

@@ -59,7 +59,7 @@ def test_geometry_preview_shares_the_mesh(mod):
     bpy.context.scene.collection.objects.link(ob)
     ob.modifiers.new("GN", "NODES").node_group = ng
     seen = {}
-    orig = mod._render_scene
+    orig = mod.preview_scene._render_scene
 
     def spy(scn):
         seen["meshes"] = sorted(m.name for m in bpy.data.meshes)
@@ -68,13 +68,13 @@ def test_geometry_preview_shares_the_mesh(mod):
 
     mod.ensure_preview_scene(32)
     before = sorted(m.name for m in bpy.data.meshes)
-    mod._render_scene = spy
+    mod.preview_scene._render_scene = spy
     try:
         mod.render_geo(ob, "T", 32, bpy.context.scene.npv, tree=ng)
     except RuntimeError:
         pass
     finally:
-        mod._render_scene = orig
+        mod.preview_scene._render_scene = orig
         bpy.data.objects.remove(ob)
         bpy.data.meshes.remove(me)
         bpy.data.materials.remove(user_mat)

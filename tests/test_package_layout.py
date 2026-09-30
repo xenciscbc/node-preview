@@ -2,15 +2,19 @@
 names it uses from them. A test that replaces such a name on ``mod``
 (``mod.fn = fake``) only changes __init__'s copy: code inside the module that
 defines it keeps calling the original, so the test would silently stop testing
-what it means to. Plain Python checks; ``mod`` is the loaded package."""
+what it means to. A function tests replace is therefore replaced on its own
+module (``mod.<module>.fn = fake``) and nobody imports it by name: callers
+elsewhere use ``<module>.fn(...)``. Plain Python checks; ``mod`` is the loaded
+package."""
 import ast
 import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# mod.a = ...  /  mod.a, mod.b = ...  /  setattr(mod, "a", ...)
-_ASSIGN = re.compile(r"^\s*((?:mod\.\w+\s*,\s*)*mod\.\w+)\s*=(?!=)", re.MULTILINE)
+# mod.a = ...  /  mod.m.a = ...  /  mod.a, mod.m.b = ...  /  setattr(mod, "a", ...)
+_ASSIGN = re.compile(r"^\s*((?:mod(?:\.\w+)+\s*,\s*)*mod(?:\.\w+)+)\s*=(?!=)",
+                     re.MULTILINE)
 _SETATTR = re.compile(r"setattr\(\s*mod\s*,\s*[\"'](\w+)[\"']")
 
 
@@ -35,34 +39,63 @@ def _defined(path):
     return out
 
 
+def _name_imports(path):
+    """(module, name) of every ``from .<module> import <name>`` in a file."""
+    out = set()
+    for node in ast.walk(ast.parse(open(path, encoding="utf-8").read())):
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+            out |= {(node.module, a.name) for a in node.names}
+    return out
+
+
 def _patched_names():
-    """(test file, name) of every ``mod.<name>`` a test assigns to."""
+    """(file, "name" or "module.name") of every ``mod.<...>`` a test or test
+    helper assigns to."""
     out = set()
     for fn in sorted(os.listdir(HERE)):
-        if not (fn.startswith("test_") and fn.endswith(".py")):
+        if not fn.endswith(".py"):
             continue
         text = open(os.path.join(HERE, fn), encoding="utf-8").read()
         for m in _ASSIGN.finditer(text):
-            out |= {(fn, n) for n in re.findall(r"mod\.(\w+)", m.group(1))}
+            out |= {(fn, n) for n in re.findall(r"mod\.(\w+(?:\.\w+)*)", m.group(1))}
         out |= {(fn, n) for n in _SETATTR.findall(text)}
     return out
 
 
-def test_patched_names_live_in_init(mod):
+def test_patches_reach_every_caller(mod):
+    subs = _submodules(mod)
     owners = {}
-    for sub, path in _submodules(mod).items():
+    for sub, path in subs.items():
         for name in _defined(path):
             owners[name] = sub
-    bad = sorted("%s replaces mod.%s, defined in %s.py" % (fn, n, owners[n])
-                 for fn, n in _patched_names() if n in owners)
-    assert not bad, ("replace these on the defining module (mod.<module>.<name>) "
-                     "and have callers look them up there:\n  " + "\n  ".join(bad))
+    imports = set()
+    for path in list(subs.values()) + [mod.__file__]:
+        imports |= _name_imports(path)
+    bad = []
+    for fn, dotted in sorted(_patched_names()):
+        parts = dotted.split(".")
+        if len(parts) == 1:
+            if dotted in owners:
+                bad.append("%s replaces mod.%s, defined in %s.py: replace "
+                           "mod.%s.%s instead" % (fn, dotted, owners[dotted],
+                                                  owners[dotted], dotted))
+        elif len(parts) == 2 and parts[0] in subs:
+            sub, name = parts
+            if name not in _defined(subs[sub]):
+                bad.append("%s replaces mod.%s, not defined in %s.py" % (fn, dotted, sub))
+            if (sub, name) in imports:
+                bad.append("%s replaces mod.%s, but it is imported by name "
+                           "(from .%s import %s): call it as %s.%s(...)"
+                           % (fn, dotted, sub, name, sub, name))
+    assert not bad, "\n  ".join([""] + bad)
 
 
 def test_patch_scan_sees_the_known_patches(mod):
     # Guards the regexes above: if they stop matching, the check passes vacuously.
     names = {n for _fn, n in _patched_names()}
-    assert {"_render_scene", "_live_space_ptrs", "process_queue", "bpy"} <= names, names
+    assert {"preview_scene._render_scene", "preview_scene._png_to_texture",
+            "sources._kind_enabled", "_live_space_ptrs", "process_queue",
+            "bpy"} <= names, sorted(names)
 
 
 def test_imported_names_are_the_modules_objects(mod):

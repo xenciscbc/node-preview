@@ -262,7 +262,7 @@ def test_stale_render_file_is_never_returned(mod):
     with open(path, "wb") as f:
         f.write(b"stale")
     try:
-        got = mod._render_scene(scn)
+        got = mod.preview_scene._render_scene(scn)
     except RuntimeError:
         got = None
     if got is not None:
@@ -285,17 +285,17 @@ def test_geometry_off_origin_is_framed(mod):
     ob.rotation_euler = (0.3, 0.0, 0.8)
     res = 48
     shots = []
-    orig = mod._png_to_texture
+    orig = mod.preview_scene._png_to_texture
 
     def spy(p):
         shots.append(load_pixels(p))
         return True
 
-    mod._png_to_texture = spy
+    mod.preview_scene._png_to_texture = spy
     try:
         assert mod.render_geo(ob, "Cube", res, _props())
     finally:
-        mod._png_to_texture = orig
+        mod.preview_scene._png_to_texture = orig
         bpy.data.objects.remove(ob)
         bpy.data.meshes.remove(me)
         bpy.data.node_groups.remove(ng)
@@ -321,7 +321,7 @@ def test_compositor_preview_ignores_output_extras(mod):
     attrs = ("use_sequencer", "use_border", "use_stamp")
     saved = {a: getattr(r, a) for a in attrs}
     seen = []
-    orig = mod._render_scene
+    orig = mod.preview_scene._render_scene
 
     def spy(s):
         seen.append({a: getattr(s.render, a) for a in attrs})
@@ -329,7 +329,7 @@ def test_compositor_preview_ignores_output_extras(mod):
 
     for a in attrs:
         setattr(r, a, True)
-    mod._render_scene = spy
+    mod.preview_scene._render_scene = spy
     try:
         try:
             mod.render_compositor(scene, "RGB", 32, scene.npv)
@@ -338,7 +338,7 @@ def test_compositor_preview_ignores_output_extras(mod):
         assert seen and not any(seen[0].values()), "preview inherited %r" % seen
         assert all(getattr(r, a) for a in attrs), "user render settings modified"
     finally:
-        mod._render_scene = orig
+        mod.preview_scene._render_scene = orig
         for a, v in saved.items():
             setattr(r, a, v)
         scene.compositing_node_group = None
