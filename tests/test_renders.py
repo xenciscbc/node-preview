@@ -29,7 +29,7 @@ def test_world_swatch_renders_and_restores_scene(mod):
     rgb.name = "RGB"
     rgb.outputs[0].default_value = (0.1, 0.8, 0.1, 1.0)
     try:
-        scn, plane, sphere = mod.ensure_preview_scene(48)
+        scn, plane, sphere = mod.preview_scene.ensure_preview_scene(48)
         cam = scn.camera
         before = (cam.data.type, tuple(cam.location), scn.world.name,
                   scn.render.film_transparent, plane.hide_render, sphere.hide_render)
@@ -71,7 +71,7 @@ def _remove_geo(ob, ng):
 def test_geometry_renders_without_leaks(mod):
     ob, ng = _geo_object()
     try:
-        mod.ensure_preview_scene(48)
+        mod.preview_scene.ensure_preview_scene(48)
         snap = datablock_names()
         with capture_renders(mod) as shots:
             assert mod.render_geo(ob, "Cube", 48, _props())
@@ -162,7 +162,7 @@ def test_compositor_renders_on_a_copy(mod):
 
 
 def test_cleanup_removes_all_preview_datablocks(mod):
-    mod.ensure_preview_scene(32)
+    mod.preview_scene.ensure_preview_scene(32)
     mod._cleanup_datablocks()
     names = datablock_names()
     leftover = [n for coll in names.values() for n in coll if n.startswith("NPV_")]

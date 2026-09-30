@@ -95,7 +95,7 @@ def _saved_names(path):
 
 
 def test_preview_scene_is_not_saved(mod):
-    mod.ensure_preview_scene(32)
+    mod.preview_scene.ensure_preview_scene(32)
     path = os.path.join(tempfile.mkdtemp(), "npv_save.blend")
     bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
     leaked = [n for n in _saved_names(path) if n.startswith("NPV_")]
@@ -108,7 +108,7 @@ def test_preview_scene_from_old_file_is_removed_on_load(mod):
     for h in saved:
         bpy.app.handlers.save_pre.remove(h)
     try:
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         path = os.path.join(tempfile.mkdtemp(), "npv_old.blend")
         bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
     finally:
@@ -192,7 +192,7 @@ def test_quality_change_requeues(mod):
 def test_preview_scene_follows_current_frame(mod):
     bpy.context.scene.frame_current = 37
     try:
-        scn, _p, _s = mod.ensure_preview_scene(32)
+        scn, _p, _s = mod.preview_scene.ensure_preview_scene(32)
         assert scn.frame_current == 37, "preview scene at frame %d" % scn.frame_current
     finally:
         bpy.context.scene.frame_current = 1

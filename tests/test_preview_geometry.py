@@ -10,7 +10,7 @@ def _uv_names(obj):
 
 
 def test_preview_meshes_have_uv(mod):
-    _scn, plane, sphere = mod.ensure_preview_scene(32)
+    _scn, plane, sphere = mod.preview_scene.ensure_preview_scene(32)
     assert _uv_names(plane), "preview plane has no UV layer"
     assert _uv_names(sphere), "preview sphere has no UV layer"
 
@@ -24,7 +24,7 @@ def test_stale_preview_mesh_without_uv_is_rebuilt(mod):
     bm.to_mesh(me)
     bm.free()
     bpy.data.objects.new(mod.PREVIEW_PLANE, me)
-    _scn, plane, _sphere = mod.ensure_preview_scene(32)
+    _scn, plane, _sphere = mod.preview_scene.ensure_preview_scene(32)
     assert _uv_names(plane), "stale preview plane without UVs was reused"
 
 

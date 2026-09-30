@@ -230,7 +230,7 @@ def test_light_tree_is_resolved_and_previewed(mod):
         assert nt.as_pointer() in mod._live_tree_pointers()
         assert mod._tree_by_pointer(nt.as_pointer()) == nt
 
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         snap = datablock_names()
         with capture_renders(mod) as shots:
             assert mod.render_shader(lt, "Tint", 32, _props())
@@ -530,7 +530,7 @@ def test_hdri_environment_lights_the_ball_and_is_cleaned_up(mod):
         wnt = bpy.data.scenes[mod.PREVIEW_SCENE].world.node_tree
         assert wnt.nodes.get("NPV_env") is not None
         props.preview_env = "UNIFORM"
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         assert wnt.nodes.get("NPV_env") is None, "HDRI node kept for Uniform"
     finally:
         props.preview_env = "UNIFORM"

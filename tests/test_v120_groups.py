@@ -111,7 +111,7 @@ def test_group_render_leaves_no_copies(mod):
     g = _passthrough_group("NPV_test_g3")
     mat = _material_using("NPV_test_gm3", g, (0.9, 0.05, 0.05, 1.0))
     try:
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         snap = datablock_names()
         _render_node(mod, g, [mat.node_tree, g], "Inner Mix")
         assert datablock_names() == snap, "group preview leaked datablocks"

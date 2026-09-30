@@ -51,7 +51,7 @@ def test_preview_render_prints_no_saved_line(mod):
     mat = _material()
     props = bpy.context.scene.npv
     try:
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         with capture_renders(mod) as shots:
             ok, text = _capture_fds(lambda: mod.render_shader(mat, "Checker", 32, props))
         assert ok, "render failed"

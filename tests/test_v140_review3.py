@@ -68,7 +68,7 @@ def test_compositor_preview_with_stereoscopy(mod):
 
 
 def test_cube_shows_three_faces(mod):
-    mod.ensure_preview_scene(32)
+    mod.preview_scene.ensure_preview_scene(32)
     cube = bpy.data.objects[mod.PREVIEW_CUBE]
     m = cube.rotation_euler.to_matrix()
     facing = [round((m @ Vector(n)).z, 3) for n in

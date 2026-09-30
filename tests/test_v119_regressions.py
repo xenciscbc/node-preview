@@ -66,7 +66,7 @@ def test_geometry_preview_shares_the_mesh(mod):
         seen["user_mats"] = [m.name if m else None for m in me.materials]
         raise RuntimeError("stop")
 
-    mod.ensure_preview_scene(32)
+    mod.preview_scene.ensure_preview_scene(32)
     before = sorted(m.name for m in bpy.data.meshes)
     mod.preview_scene._render_scene = spy
     try:

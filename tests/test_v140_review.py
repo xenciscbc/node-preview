@@ -257,7 +257,7 @@ def test_preview_uses_the_output_the_engine_renders(mod):
 #  Renders
 # --------------------------------------------------------------------------- #
 def test_stale_render_file_is_never_returned(mod):
-    scn, _plane, _sphere = mod.ensure_preview_scene(16)
+    scn, _plane, _sphere = mod.preview_scene.ensure_preview_scene(16)
     path = os.path.join(bpy.app.tempdir, "npv_render.png")
     with open(path, "wb") as f:
         f.write(b"stale")
@@ -471,7 +471,7 @@ def test_geo_preview_render_does_not_requeue_itself(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.ensure_preview_scene(32)
+        mod.preview_scene.ensure_preview_scene(32)
         mod.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"]
         with capture_renders(mod):
