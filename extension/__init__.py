@@ -47,9 +47,11 @@ from gpu.types import GPUTexture, Buffer
 from gpu_extras.batch import batch_for_shader
 
 # Split-out modules, in dependency order (a module only imports from those
-# before it). When the add-on is re-enabled after an update on disk, Blender
-# reloads only this file; reload them first so they don't keep running the
-# old code. On the first load none of them is in sys.modules yet.
+# before it). Installing or updating through Blender's extension operators
+# drops the add-on and all its modules from sys.modules, but when files change
+# in place (development) and the add-on is re-enabled, or on Reload Scripts,
+# Blender reloads only this file: reload them first so they don't keep
+# running the old code. On the first load none of them is in sys.modules yet.
 _SUBMODULES = ("common", "eligibility", "hashing", "i18n")
 for _name in _SUBMODULES:
     _mod = sys.modules.get("%s.%s" % (__name__, _name))
