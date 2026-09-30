@@ -74,3 +74,18 @@ def test_imported_names_are_the_modules_objects(mod):
         for name in _defined(path):
             if name in vars(mod):
                 assert getattr(mod, name) is getattr(m, name), "%s.%s" % (sub, name)
+
+
+def test_reload_list_covers_every_module_in_order(mod):
+    # __init__ reloads _SUBMODULES in order when Blender reloads the add-on
+    # after an update; a module missing from it would keep its old code, and
+    # one reloaded before a module it imports from would bind the old names.
+    subs = _submodules(mod)
+    order = list(mod._SUBMODULES)
+    assert sorted(order) == sorted(subs), (order, sorted(subs))
+    for i, sub in enumerate(order):
+        tree = ast.parse(open(subs[sub], encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                dep = node.module.split(".")[0]
+                assert dep in order[:i], "%s imports .%s but is reloaded before it" % (sub, dep)

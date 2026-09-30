@@ -29,7 +29,9 @@ Tested on Blender 5.2 (EEVEE + Cycles, Vulkan). Blender Extension: metadata
 and version live in blender_manifest.toml next to this file.
 """
 
+import importlib
 import os
+import sys
 import time
 import shutil
 import hashlib
@@ -44,9 +46,20 @@ import numpy as np
 from gpu.types import GPUTexture, Buffer
 from gpu_extras.batch import batch_for_shader
 
-# Split-out modules. Their names are imported here because the code below
-# uses them as globals; none of them is replaced by a test (see
-# tests/test_package_layout.py), so a plain name import is safe.
+# Split-out modules, in dependency order (a module only imports from those
+# before it). When the add-on is re-enabled after an update on disk, Blender
+# reloads only this file; reload them first so they don't keep running the
+# old code. On the first load none of them is in sys.modules yet.
+_SUBMODULES = ("common", "eligibility", "hashing", "i18n")
+for _name in _SUBMODULES:
+    _mod = sys.modules.get("%s.%s" % (__name__, _name))
+    if _mod is not None:
+        importlib.reload(_mod)
+del _name, _mod
+
+# Their names are imported here because the code below uses them as globals;
+# none of them is replaced by a test (see tests/test_package_layout.py), so a
+# plain name import is safe.
 from .common import (
     KIND_SHADER, KIND_GEO, KIND_COMP, KIND_WORLD, KINDS, PREVIEW_PREV_WORLD,
     space_kind, PREVIEW_SCENE, PREVIEW_PLANE, PREVIEW_SPHERE, PREVIEW_CUBE,
