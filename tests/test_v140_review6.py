@@ -25,11 +25,11 @@ def test_timer_drops_an_editor_switched_to_another_tree_type(mod):
     mod.queue._render_item = lambda item, res, p: rendered.append(item["key"]) or object()
     try:
         _clear(mod)
-        st["editors"][777] = {"tree": 5, "kind": mod.KIND_GEO, "path": [5], "hint": [],
+        st["editors"][777] = {"tree": 5, "kind": mod.common.KIND_GEO, "path": [5], "hint": [],
                               "pinned": False, "ctx": "c", "visible": set(),
                               "priority": set()}
         st["queue"][:] = [{"key": "5:n%d|#c" % i, "node": "n%d" % i, "hash": "h",
-                           "kind": mod.KIND_GEO} for i in range(5)]
+                           "kind": mod.common.KIND_GEO} for i in range(5)]
         st["queued_keys"] = {it["key"] for it in st["queue"]}
         st["dirty"] = False
         mod._timer()
@@ -44,11 +44,11 @@ def test_editor_switched_to_another_kind_is_forgotten(mod):
     st = mod._state
     orig = mod.timer._live_space_ptrs, mod.timer._live_space_kinds
     mod.timer._live_space_ptrs = lambda: {778, 779}
-    mod.timer._live_space_kinds = lambda: {778: mod.KIND_SHADER, 779: mod.KIND_GEO}
+    mod.timer._live_space_kinds = lambda: {778: mod.common.KIND_SHADER, 779: mod.common.KIND_GEO}
     try:
         _clear(mod)
         for k in (778, 779):
-            st["editors"][k] = {"tree": k, "kind": mod.KIND_GEO, "path": [k], "hint": [],
+            st["editors"][k] = {"tree": k, "kind": mod.common.KIND_GEO, "path": [k], "hint": [],
                                 "pinned": False, "visible": set(), "priority": set()}
         mod.timer._prune_editors()
         assert set(st["editors"]) == {779}, set(st["editors"])
@@ -81,7 +81,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert {"Noise", "Math", "Comb", "SP"} <= {it["node"] for it in mod._state["queue"]}
         for it in mod._state["queue"]:
             mod._state["textures"][it["key"]] = object()
@@ -90,7 +90,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
         mod._state["queued_keys"].clear()
 
         noise.inputs["Scale"].default_value = 9.0
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         again = {it["node"] for it in mod._state["queue"]}
         # Noise's own swatch and the geometry downstream change; Math / Comb
         # render with their own input values and can't.
@@ -102,7 +102,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
         math.inputs[1].default_value = 0.7        # the swatch's own input
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert {it["node"] for it in mod._state["queue"]} == {"Math", "SP"}
     finally:
         props.preview_geometry = False

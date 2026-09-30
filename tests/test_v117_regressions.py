@@ -77,7 +77,7 @@ def test_queue_carries_the_tree(mod):
     ob.modifiers.new("Q", "NODES").node_group = ng
     st = mod._state
     try:
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, bpy.context.scene.npv, force=True)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, bpy.context.scene.npv, force=True)
         assert st["queue"], "nothing queued"
         assert all(it.get("tree") == ng.name for it in st["queue"]), st["queue"]
     finally:
@@ -174,14 +174,14 @@ def test_quality_change_requeues(mod):
     st = mod._state
     old = props.resolution
     try:
-        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.common.KIND_SHADER, props)
         for it in st["queue"]:
             st["textures"][it["key"]] = object()
             st["hashes"][it["key"]] = it["hash"]
         st["queue"].clear()
         st["queued_keys"].clear()
         props.resolution = "256" if old != "256" else "64"
-        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.common.KIND_SHADER, props)
         assert st["queue"], "changing Quality did not re-queue previews"
     finally:
         props.resolution = old

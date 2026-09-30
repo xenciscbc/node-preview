@@ -89,7 +89,7 @@ def test_failed_render_is_not_retried_until_it_changes(mod):
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         n = len(mod._state["queue"])
         assert n
         props.batch_size = 8
@@ -98,17 +98,17 @@ def test_failed_render_is_not_retried_until_it_changes(mod):
             mod.queue.process_queue(props)
         assert len(calls) == n and len(mod._state["failed"]) == n
 
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert not mod._state["queue"], "failed renders re-queued with no change"
 
         nt.nodes["Src"].inputs[0].default_value = 5.0
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert any(it["node"] == "Src" for it in mod._state["queue"]), \
             "changed node was not retried"
 
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props, force=True)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props, force=True)
         assert len(mod._state["queue"]) == n, "Refresh did not retry failures"
     finally:
         mod.queue._render_item = orig
@@ -156,15 +156,15 @@ def test_shared_geo_tree_previews_the_hinted_object(mod):
     props.preview_geometry = True
     try:
         _clear(mod)
-        assert mod.resolve_source(ng, mod.KIND_GEO) == ("OBJ", a.name)
+        assert mod.sources.resolve_source(ng, mod.common.KIND_GEO) == ("OBJ", a.name)
         mod._state["src_hint"] = [("OBJ", b.name)]
-        assert mod.resolve_source(ng, mod.KIND_GEO) == ("OBJ", b.name)
+        assert mod.sources.resolve_source(ng, mod.common.KIND_GEO) == ("OBJ", b.name)
 
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"][0]["src"] == b.name
         _mark_rendered(mod)
         mod._state["src_hint"] = [("OBJ", a.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"] and mod._state["queue"][0]["src"] == a.name, \
             "switching the active object did not re-render"
     finally:
@@ -183,9 +183,9 @@ def test_hinted_material_wins_for_a_shared_tree_lookup(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("MAT", m2.name)]
-        assert mod.resolve_source(m2.node_tree, mod.KIND_SHADER) == ("MAT", m2.name)
+        assert mod.sources.resolve_source(m2.node_tree, mod.common.KIND_SHADER) == ("MAT", m2.name)
         # A hint that doesn't own the tree is ignored.
-        assert mod.resolve_source(m1.node_tree, mod.KIND_SHADER) == ("MAT", m1.name)
+        assert mod.sources.resolve_source(m1.node_tree, mod.common.KIND_SHADER) == ("MAT", m1.name)
     finally:
         _clear(mod)
         bpy.data.materials.remove(m1)
@@ -226,7 +226,7 @@ def test_light_tree_is_resolved_and_previewed(mod):
         nt.links.new(rgb.outputs[0], emit.inputs["Color"])
         nt.links.new(emit.outputs[0], out.inputs["Surface"])
 
-        assert mod.resolve_source(nt, mod.KIND_SHADER) == ("LIGHT", lt.name)
+        assert mod.sources.resolve_source(nt, mod.common.KIND_SHADER) == ("LIGHT", lt.name)
         assert nt.as_pointer() in mod.queue._live_tree_pointers()
         assert mod.sources._tree_by_pointer(nt.as_pointer()) == nt
 
@@ -243,7 +243,7 @@ def test_light_tree_is_resolved_and_previewed(mod):
                   if set(after[k]) - set(snap[k])}
         assert not leaked, "light preview leaked %r" % leaked
 
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, _props())
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, _props())
         assert all(it["src_type"] == "LIGHT" for it in mod._state["queue"])
     finally:
         _clear(mod)
@@ -328,7 +328,7 @@ def test_process_queue_stores_the_value(mod):
     mod.preview_scene._png_to_texture = fake
     try:
         _clear(mod)
-        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.common.KIND_SHADER, props)
         mod._state["queue"][:] = [it for it in mod._state["queue"] if it["node"] == "Src"]
         mod._state["queued_keys"] = {it["key"] for it in mod._state["queue"]}
         mod.queue.process_queue(props)
@@ -394,7 +394,7 @@ def test_time_budget_stops_the_step_early(mod):
     try:
         _clear(mod)
         st["queue"][:] = [{"key": "%d:n%d|" % (1, i), "node": "n%d" % i, "hash": "h",
-                           "kind": mod.KIND_SHADER} for i in range(6)]
+                           "kind": mod.common.KIND_SHADER} for i in range(6)]
         props.batch_size = 6
         props.time_budget = 50
         mod.queue.process_queue(props)
@@ -464,19 +464,19 @@ def test_update_on_frame_puts_the_frame_in_the_hash(mod):
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         _mark_rendered(mod)
         scn.frame_set(f0 + 3)
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert not mod._state["queue"], "frame change re-rendered with the option off"
         props.update_on_frame = True
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         _mark_rendered(mod)
         scn.frame_set(f0 + 4)
         mod._state["dirty"] = False
         mod._on_frame_change(scn)
         assert mod._state["dirty"]
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert mod._state["queue"], "frame change did not re-render with the option on"
     finally:
         props.update_on_frame = False
@@ -512,7 +512,7 @@ def test_cube_shape_renders_and_is_hidden_afterwards(mod):
 
 
 def test_hdri_environment_lights_the_ball_and_is_cleaned_up(mod):
-    items = [i[0] for i in mod._env_items(None, None)]
+    items = [i[0] for i in mod.preview_scene._env_items(None, None)]
     assert items[0] == "UNIFORM"
     if len(items) < 2:
         print("  (skipped: no bundled studio HDRIs)")
@@ -558,7 +558,7 @@ def test_export_job_writes_a_png(mod):
         os.remove(fp)
     try:
         node = mat.node_tree.nodes["Src"]
-        job = mod.export_job(mat.node_tree, mod.KIND_SHADER, _props(), node)
+        job = mod.operators.export_job(mat.node_tree, mod.common.KIND_SHADER, _props(), node)
         assert job and job["src"] == mat.name
         mod._state["export_to"] = fp
         try:
@@ -655,7 +655,7 @@ def test_draw_callback_smoke(mod):
         width, height, view2d = 4000, 4000, V2D()
 
     class Space:
-        type, tree_type, shader_type = "NODE_EDITOR", mod.KIND_SHADER, "OBJECT"
+        type, tree_type, shader_type = "NODE_EDITOR", mod.common.KIND_SHADER, "OBJECT"
         edit_tree, path, id, id_from = nt, [], mat, None
 
     class Ctx:
@@ -675,7 +675,7 @@ def test_draw_callback_smoke(mod):
         for i, n in enumerate(nodes):
             n.location = (i * 300.0, 200.0)
         nt.nodes.active = nt.nodes["Src"]
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         keys = [it["key"] for it in mod._state["queue"]]
         src_key = next(it["key"] for it in mod._state["queue"] if it["node"] == "Src")
         # Src rendered with a number; one failed; the rest still queued.
@@ -744,7 +744,7 @@ def test_panel_and_prefs_draw(mod):
     seen = set()
 
     class Space:
-        type, tree_type, shader_type = "NODE_EDITOR", mod.KIND_SHADER, "OBJECT"
+        type, tree_type, shader_type = "NODE_EDITOR", mod.common.KIND_SHADER, "OBJECT"
         edit_tree = mat.node_tree
 
     class Ctx:
@@ -777,11 +777,11 @@ def test_queued_item_follows_a_source_switch(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", b.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"][0]["src"] == b.name
         # Switch before anything rendered: the waiting item must follow.
         mod._state["src_hint"] = [("OBJ", a.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert len(mod._state["queue"]) == 1
         assert mod._state["queue"][0]["src"] == a.name, \
             "queued item kept the old source under the new hash"
@@ -811,16 +811,16 @@ def test_pinned_editor_keeps_its_own_hint(mod):
     try:
         _clear(mod)
         mod._state["editors"].clear()
-        mod.drawing._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
-        mod.drawing._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
+        mod.drawing._record_editor(ctx, unpinned, tp, mod.common.KIND_GEO, [tp], props, ng)
+        mod.drawing._record_editor(ctx, pinned, tp, mod.common.KIND_GEO, [tp], props, ng)
         # The pinned editor ignores the active object and doesn't set the
         # global hint; redrawing both in turn no longer marks anything dirty.
         assert mod._state["editors"][1001]["hint"] == [("OBJ", a.name)]
         assert mod._state["src_hint"] == [("OBJ", b.name)]
         mod._state["dirty"] = False
         for _ in range(3):
-            mod.drawing._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
-            mod.drawing._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
+            mod.drawing._record_editor(ctx, pinned, tp, mod.common.KIND_GEO, [tp], props, ng)
+            mod.drawing._record_editor(ctx, unpinned, tp, mod.common.KIND_GEO, [tp], props, ng)
         assert not mod._state["dirty"], "two editors keep re-queueing each other"
         # Sharing one tree, both are rebuilt, each through its own object:
         # the source is part of the cache key, so they don't collide.
@@ -852,12 +852,12 @@ def test_undo_to_the_shown_thumbnail_clears_the_failure(mod):
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         _mark_rendered(mod)
         key = next(k for k in mod._state["textures"] if k.split(":", 1)[1].startswith("Src|"))
         # An edit whose render failed, then undone.
         mod._state["failed"][key] = "hash-of-the-failing-edit"
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert not mod._state["queue"]
         assert key not in mod._state["failed"], "stale failure marker kept after undo"
     finally:

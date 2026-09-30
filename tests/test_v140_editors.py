@@ -69,8 +69,8 @@ def _teardown(mod, mat, ng, ob):
 
 def _draw_both(mod, props, mat, ng, shader, geo):
     mp, gp = mat.node_tree.as_pointer(), ng.as_pointer()
-    mod.drawing._record_editor(_Ctx(), shader, mp, mod.KIND_SHADER, [mp], props, mat.node_tree)
-    mod.drawing._record_editor(_Ctx(), geo, gp, mod.KIND_GEO, [gp], props, ng)
+    mod.drawing._record_editor(_Ctx(), shader, mp, mod.common.KIND_SHADER, [mp], props, mat.node_tree)
+    mod.drawing._record_editor(_Ctx(), geo, gp, mod.common.KIND_GEO, [gp], props, ng)
 
 
 def test_alternating_editors_do_not_mark_dirty(mod):
@@ -106,9 +106,9 @@ def test_timer_rebuilds_every_editor(mod):
         mod._state["dirty"] = True
         mod._timer()
         nodes = {(it["kind"], it["node"]) for it in mod._state["queue"]}
-        assert (mod.KIND_SHADER, "Noise") in nodes, \
+        assert (mod.common.KIND_SHADER, "Noise") in nodes, \
             "the shader editor was not rebuilt (only the last drawn editor was): %r" % nodes
-        assert (mod.KIND_GEO, "Cube") in nodes, nodes
+        assert (mod.common.KIND_GEO, "Cube") in nodes, nodes
         geo_item = next(it for it in mod._state["queue"] if it["node"] == "Cube")
         assert geo_item["src"] == ob.name
 
@@ -139,7 +139,7 @@ def test_closed_editor_is_forgotten(mod):
         mod.timer._live_space_ptrs = lambda: {502}
         targets = mod.timer._editor_targets()
         assert set(mod._state["editors"]) == {502}
-        assert [t[1] for t in targets] == [mod.KIND_GEO], targets
+        assert [t[1] for t in targets] == [mod.common.KIND_GEO], targets
     finally:
         mod.timer._live_space_ptrs = orig
         _teardown(mod, mat, ng, ob)

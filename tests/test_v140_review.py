@@ -167,18 +167,18 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert any(it["node"] == "Xform" for it in mod._state["queue"])
         _mark_rendered(mod)
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert not mod._state["queue"], "GN previews re-queued with no change"
 
         m.show_expanded = not m.show_expanded
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert not mod._state["queue"], "a modifier panel toggle re-rendered"
 
         set_modifier_input(m, ident, "Amount", 2.0)
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"], "modifier input change not detected"
         _mark_rendered(mod)
 
@@ -186,7 +186,7 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         # preview shares the mesh) must not re-render: that looped forever.
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
         assert mod._state["dirty"]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert not mod._state["queue"], "a data update with no change re-rendered"
 
         # A real edit of the object's data does.
@@ -194,12 +194,12 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         ob.data.vertices[-1].co = (0.5, 0.25, 0.0)
         ob.data.update()
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"], "object data edit not detected"
         _mark_rendered(mod)
         ob.data.vertices[-1].co = (0.5, 0.75, 0.0)
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"], "moving a vertex not detected"
     finally:
         props.preview_geometry = False
@@ -215,7 +215,7 @@ def test_tree_signature_memo_is_scoped_to_a_rebuild(mod):
     try:
         mat.node_tree.nodes.new("ShaderNodeTexNoise")
         _clear(mod)
-        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, _props())
+        mod.queue.rebuild_queue(mat.node_tree, mod.common.KIND_SHADER, _props())
         assert mod._state["tree_sig_memo"] is None, "memo left active after rebuild"
     finally:
         _clear(mod)
@@ -356,10 +356,10 @@ def test_rebuild_drops_pending_renders_no_longer_shown(mod):
         for idn in ("ShaderNodeTexNoise", "ShaderNodeTexWave"):
             nt.nodes.new(idn).select = False
         _clear(mod)
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert len(mod._state["queue"]) == 2
         props.preview_scope = "SELECTED"
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert not mod._state["queue"], "renders of filtered-out nodes kept queued"
         assert not mod._state["queued_keys"]
     finally:
@@ -374,8 +374,8 @@ def test_timer_drops_pending_renders_of_disabled_kinds(mod):
     _clear(mod)
     try:
         props.preview_compositor = False
-        st["queue"][:] = [{"key": "1:a|", "kind": mod.KIND_COMP, "chain": []},
-                          {"key": "1:b|", "kind": mod.KIND_SHADER, "chain": []}]
+        st["queue"][:] = [{"key": "1:a|", "kind": mod.common.KIND_COMP, "chain": []},
+                          {"key": "1:b|", "kind": mod.common.KIND_SHADER, "chain": []}]
         st["queued_keys"] = {"1:a|", "1:b|"}
         mod.queue._drop_disallowed(props)
         assert [it["key"] for it in st["queue"]] == ["1:b|"], st["queue"]
@@ -383,8 +383,8 @@ def test_timer_drops_pending_renders_of_disabled_kinds(mod):
 
         props.preview_compositor = True
         props.comp_groups = False
-        st["queue"][:] = [{"key": "1:c|", "kind": mod.KIND_COMP, "chain": ["G"]},
-                          {"key": "1:d|", "kind": mod.KIND_COMP, "chain": []}]
+        st["queue"][:] = [{"key": "1:c|", "kind": mod.common.KIND_COMP, "chain": ["G"]},
+                          {"key": "1:d|", "kind": mod.common.KIND_COMP, "chain": []}]
         st["queued_keys"] = {"1:c|", "1:d|"}
         mod.queue._drop_disallowed(props)
         assert [it["key"] for it in st["queue"]] == ["1:d|"], st["queue"]
@@ -425,7 +425,7 @@ def test_socket_enum_numbers_follow_the_identifier(mod):
 
 
 def test_env_enum_numbers_are_unique(mod):
-    items = mod._env_items(None, None)
+    items = mod.preview_scene._env_items(None, None)
     nums = [it[3] for it in items]
     assert items[0][0] == "UNIFORM" and nums[0] == 0
     assert len(set(nums)) == len(nums), nums
@@ -440,13 +440,13 @@ def test_linked_data_with_a_local_name_resolves_separately(mod):
         dst.materials = [name]
     linked = next(m for m in bpy.data.materials if m.name == name and m.library)
     try:
-        assert mod._idref(mat) == name
+        assert mod.sources._idref(mat) == name
         assert mod.sources._idget(bpy.data.materials, name) == mat, "plain name hit linked data"
-        ref = mod._idref(linked)
+        ref = mod.sources._idref(linked)
         assert ref != name
         assert mod.sources._idget(bpy.data.materials, ref) == linked
         mod._state["src_hint"] = [("MAT", ref)]
-        assert mod.resolve_source(linked.node_tree, mod.KIND_SHADER) == ("MAT", ref)
+        assert mod.sources.resolve_source(linked.node_tree, mod.common.KIND_SHADER) == ("MAT", ref)
     finally:
         mod._state["src_hint"] = []
         bpy.data.libraries.remove(linked.library)
@@ -472,7 +472,7 @@ def test_geo_preview_render_does_not_requeue_itself(mod):
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
         mod.preview_scene.ensure_preview_scene(32)
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert mod._state["queue"]
         with capture_renders(mod):
             while mod._state["queue"]:
@@ -480,7 +480,7 @@ def test_geo_preview_render_does_not_requeue_itself(mod):
         # What Blender reports after the render, from both scenes.
         for _ in range(2):
             mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert not mod._state["queue"], "a preview render re-queued its own previews"
     finally:
         props.preview_geometry = False

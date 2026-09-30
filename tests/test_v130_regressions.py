@@ -58,7 +58,7 @@ def test_compositor_rgb_change_requeues(mod):
     try:
         for k in ("textures", "hashes", "queue", "queued_keys"):
             st[k].clear()
-        mod.queue.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
+        mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props, path=[tree])
         assert any(it["node"] == "RGB" for it in st["queue"]), "RGB not queued"
         for it in st["queue"]:
             st["textures"][it["key"]] = object()
@@ -66,7 +66,7 @@ def test_compositor_rgb_change_requeues(mod):
         st["queue"].clear()
         st["queued_keys"].clear()
         rgb.outputs[0].default_value = (0.1, 0.1, 0.9, 1.0)
-        mod.queue.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
+        mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props, path=[tree])
         assert any(it["node"] == "RGB" for it in st["queue"]), \
             "RGB colour change did not re-queue its preview"
     finally:
@@ -96,7 +96,7 @@ def test_timer_redraws_after_dropping_thumbnails(mod):
         props.enabled = props.auto_update = True
         props.comp_groups = False
         mod.queue._tag_node_editors = lambda: calls.append(1)
-        mod.sources._resolve_active = lambda: (grp, mod.KIND_COMP, [tree, grp])
+        mod.sources._resolve_active = lambda: (grp, mod.common.KIND_COMP, [tree, grp])
         mod.sources._kind_enabled = lambda kind, p: True
         st["dirty"] = True
         mod._timer()

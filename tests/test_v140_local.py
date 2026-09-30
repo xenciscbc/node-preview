@@ -78,7 +78,7 @@ def test_mesh_edit_does_not_rerender_field_swatches(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert {it["node"] for it in mod._state["queue"]} >= {"Xform", "Noise"}
         for it in mod._state["queue"]:
             mod._state["textures"][it["key"]] = object()
@@ -86,8 +86,8 @@ def test_mesh_edit_does_not_rerender_field_swatches(mod):
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
         me.vertices[0].co = (0.0, 0.0, 2.0)
-        mod.queue._mark_data_changed(mod._idref(me))
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue._mark_data_changed(mod.sources._idref(me))
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         assert [it["node"] for it in mod._state["queue"]] == ["Xform"], \
             [it["node"] for it in mod._state["queue"]]
     finally:
@@ -109,7 +109,7 @@ def test_edit_mode_reuses_the_fingerprint(mod):
         orig = mod.queue._compute_data_sig
         mod.queue._compute_data_sig = lambda d, o=None: calls.append(1) or orig(d, o)
         try:
-            mod.queue._mark_data_changed(mod._idref(me))
+            mod.queue._mark_data_changed(mod.sources._idref(me))
             # A mesh in Edit Mode (is_editmode) returns the cached value.
             proxy = type("M", (), {"name": me.name, "library": None, "is_editmode": True})()
             assert mod.queue._data_sig(proxy) == first and not calls, \

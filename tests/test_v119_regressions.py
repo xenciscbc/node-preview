@@ -195,12 +195,12 @@ def test_rebuild_drops_textures_of_removed_nodes(mod):
     n2.name = "Gone"
     props = bpy.context.scene.npv
     try:
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         _mark_rendered(mod)
         gone = [k for k in mod._state["textures"] if ":Gone|" in k]
         assert gone, "setup: no texture for 'Gone'"
         nt.nodes.remove(n2)
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         left = [k for k in mod._state["textures"] if ":Gone|" in k]
         assert not left, "texture of a deleted node kept: %r" % left
         assert any(":Keep|" in k for k in mod._state["textures"]), "live texture dropped"
@@ -214,7 +214,7 @@ def test_prune_drops_textures_of_deleted_trees(mod):
     mat.node_tree.nodes.new("ShaderNodeTexNoise")
     props = bpy.context.scene.npv
     try:
-        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.common.KIND_SHADER, props)
         _mark_rendered(mod)
         assert mod._state["textures"], "setup: nothing cached"
         bpy.data.materials.remove(mat)

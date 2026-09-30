@@ -41,12 +41,12 @@ def test_editor_hint_keeps_the_library_of_linked_data(mod):
         dst.materials = [name]
     linked = next(m for m in bpy.data.materials if m.name == name and m.library)
     try:
-        hint = mod._editor_hint(_Ctx(), _Space(1, linked))
-        assert hint == [("MAT", mod._idref(linked))], hint
+        hint = mod.drawing._editor_hint(_Ctx(), _Space(1, linked))
+        assert hint == [("MAT", mod.sources._idref(linked))], hint
         mod._state["src_hint"] = hint
-        assert mod.resolve_source(linked.node_tree, mod.KIND_SHADER) == \
-            ("MAT", mod._idref(linked)), "linked hint resolved to the local material"
-        assert mod._editor_hint(_Ctx(), _Space(2, mat)) == [("MAT", name)]
+        assert mod.sources.resolve_source(linked.node_tree, mod.common.KIND_SHADER) == \
+            ("MAT", mod.sources._idref(linked)), "linked hint resolved to the local material"
+        assert mod.drawing._editor_hint(_Ctx(), _Space(2, mat)) == [("MAT", name)]
     finally:
         mod._state["src_hint"] = []
         bpy.data.libraries.remove(linked.library)
@@ -63,7 +63,7 @@ def _changed(mod, data, obj, edit):
     before = mod.queue._data_sig(data, obj)
     edit()
     assert mod.queue._data_sig(data, obj) == before, "fingerprint recomputed without an update"
-    mod.queue._mark_data_changed(mod._idref(data))
+    mod.queue._mark_data_changed(mod.sources._idref(data))
     return mod.queue._data_sig(data, obj) != before
 
 
@@ -182,8 +182,8 @@ def test_two_editors_on_one_tree_keep_their_own_thumbnails(mod):
     try:
         _clear(mod)
         for sp in (sa, sb):
-            ent = mod.drawing._record_editor(_Ctx(), sp, tp, mod.KIND_GEO, [tp], props, ng)
-            ent["ctx"] = mod.drawing._editor_view_ctx(sp, ng, mod.KIND_GEO, ent["hint"])
+            ent = mod.drawing._record_editor(_Ctx(), sp, tp, mod.common.KIND_GEO, [tp], props, ng)
+            ent["ctx"] = mod.drawing._editor_view_ctx(sp, ng, mod.common.KIND_GEO, ent["hint"])
         ctx_a = mod._state["editors"][701]["ctx"]
         ctx_b = mod._state["editors"][702]["ctx"]
         assert ctx_a and ctx_b and ctx_a != ctx_b
@@ -238,7 +238,7 @@ def test_group_entered_from_two_materials_keeps_both(mod):
         _clear(mod)
         # Two editors, each in the group entered from its own material.
         for i, m in enumerate(mats):
-            chain = mod._instance_chain([m.node_tree, g])
+            chain = mod.renderers._instance_chain([m.node_tree, g])
             mod._state["editors"][800 + i] = {
                 "tree": g.as_pointer(), "visible": set(), "priority": set(),
                 "ctx": mod.common._view_ctx(("MAT", m.name), chain)}
@@ -246,7 +246,7 @@ def test_group_entered_from_two_materials_keeps_both(mod):
         for m in mats:
             mod._state["src_hint"] = [("MAT", m.name)]
             before = {it["key"] for it in mod._state["queue"]}
-            mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m.node_tree, g])
+            mod.queue.rebuild_queue(g, mod.common.KIND_SHADER, props, path=[m.node_tree, g])
             keys[m.name] = {it["key"] for it in mod._state["queue"]} - before
         a, b = (keys[m.name] for m in mats)
         assert a and b and not (a & b), "one group, two materials: keys collide"
@@ -340,7 +340,7 @@ def test_weight_paint_mode_defers_the_weight_hash(mod):
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()
         first = mod.queue._data_sig(me, ob)
-        ref = mod._idref(me)
+        ref = mod.sources._idref(me)
         calls = []
         orig = mod.queue._compute_data_sig
         mod.queue._compute_data_sig = lambda d, o=None: calls.append(1) or orig(d, o)
@@ -396,7 +396,7 @@ def test_shared_mesh_weight_fingerprint_per_object_kind(mod):
         # either way each fingerprint notices the change on its own).
         sa0, sb0 = mod.queue._data_sig(me, a), mod.queue._data_sig(me, b)
         vg.add([0], 0.9, "REPLACE")
-        mod.queue._mark_data_changed(mod._idref(me))
+        mod.queue._mark_data_changed(mod.sources._idref(me))
         sb1 = mod.queue._data_sig(me, b)          # b rebuilds first ...
         sa1 = mod.queue._data_sig(me, a)          # ... a still sees the change
         assert sa1 != sa0, "weights change lost when another object rebuilt first"
@@ -423,7 +423,7 @@ def test_failed_count_is_per_view(mod):
                     seen.append(k.get("text")) if n == "label" else None)
 
         class Space:
-            type, tree_type, shader_type, edit_tree = "NODE_EDITOR", mod.KIND_SHADER, "OBJECT", tree
+            type, tree_type, shader_type, edit_tree = "NODE_EDITOR", mod.common.KIND_SHADER, "OBJECT", tree
 
             def as_pointer(self):
                 return 950

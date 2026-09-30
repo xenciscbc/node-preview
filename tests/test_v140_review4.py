@@ -73,7 +73,7 @@ def test_shape_key_value_and_shape_change_the_fingerprint(mod):
         kb = ob.shape_key_add(name="Up")
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()
-        ref = mod._idref(me)
+        ref = mod.sources._idref(me)
         s0 = mod.queue._data_sig(me, ob)
         kb.value = 0.6
         mod.queue._mark_data_changed(ref)
@@ -104,11 +104,11 @@ def test_topology_only_edit_changes_the_fingerprint(mod):
         mod._state["data_gen"].clear()
         s0 = mod.queue._data_sig(me, ob)
         me.flip_normals()          # same positions and counts, new winding
-        mod.queue._mark_data_changed(mod._idref(me))
+        mod.queue._mark_data_changed(mod.sources._idref(me))
         assert mod.queue._data_sig(me, ob) != s0, "Flip Normals not seen"
         s1 = mod.queue._data_sig(me, ob)
         me.vertices[0].select = not me.vertices[0].select
-        mod.queue._mark_data_changed(mod._idref(me))
+        mod.queue._mark_data_changed(mod.sources._idref(me))
         assert mod.queue._data_sig(me, ob) == s1, "selection changed the fingerprint"
     finally:
         mod._state["data_sigs"].clear()
@@ -131,7 +131,7 @@ def test_editor_is_forgotten_when_it_stops_showing_previews(mod):
     saved = mod.drawing.bpy
     try:
         _clear(mod)
-        mod._state["editors"][4242] = {"tree": 1, "kind": mod.KIND_SHADER, "path": [1],
+        mod._state["editors"][4242] = {"tree": 1, "kind": mod.common.KIND_SHADER, "path": [1],
                                        "hint": [], "pinned": False,
                                        "visible": set(), "priority": set()}
         mod.drawing.bpy = type("B", (), {"context": Ctx(), "types": bpy.types, "data": bpy.data})
@@ -140,7 +140,7 @@ def test_editor_is_forgotten_when_it_stops_showing_previews(mod):
         # Preview type switched off: its editors are no rebuild targets.
         mod.drawing.bpy = saved
         props = _props()
-        mod._state["editors"][4243] = {"tree": 1, "kind": mod.KIND_GEO, "path": [1],
+        mod._state["editors"][4243] = {"tree": 1, "kind": mod.common.KIND_GEO, "path": [1],
                                        "hint": [], "pinned": False,
                                        "visible": set(), "priority": set()}
         props.preview_geometry = False
@@ -150,7 +150,7 @@ def test_editor_is_forgotten_when_it_stops_showing_previews(mod):
             targets = mod.timer._editor_targets()
         finally:
             mod.timer._live_space_ptrs = orig
-        assert all(t[1] != mod.KIND_GEO for t in targets), targets
+        assert all(t[1] != mod.common.KIND_GEO for t in targets), targets
     finally:
         mod.drawing.bpy = saved
         _clear(mod)
@@ -184,8 +184,8 @@ def test_nodes_inside_a_zone_get_no_preview(mod):
         links.new(join.outputs[0], zo.inputs[0])
         links.new(zo.outputs[0], after.inputs[0])
         links.new(after.outputs[0], go.inputs[0])
-        mod._zone_cache.clear()
-        inside = {n.name for n in nodes if mod._in_zone(n)}
+        mod.eligibility._zone_cache.clear()
+        inside = {n.name for n in nodes if mod.eligibility._in_zone(n)}
         assert {zi.name, "Inner", "Join"} <= inside, inside
         # A node that only feeds into the zone is outside it (Blender's zone
         # frame doesn't include it; it can be wired to the Group Output).
@@ -193,11 +193,11 @@ def test_nodes_inside_a_zone_get_no_preview(mod):
 
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.common.KIND_GEO, props)
         queued = {it["node"] for it in mod._state["queue"]}
         assert {"Xform", zo.name, "After", "JoinedIn"} <= queued, queued
         assert not queued & inside, "nodes inside the zone queued: %r" % (queued & inside)
-        assert mod.export_job(ng, mod.KIND_GEO, props, nodes["Inner"]) is None
+        assert mod.operators.export_job(ng, mod.common.KIND_GEO, props, nodes["Inner"]) is None
     finally:
         props.preview_geometry = False
         _clear(mod)

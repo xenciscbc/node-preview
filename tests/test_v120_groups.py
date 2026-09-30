@@ -70,7 +70,7 @@ def _render_node(mod, tree, path, node_name):
     ``node_name``; returns its mean colour."""
     props = bpy.context.scene.npv
     _clear_state(mod)
-    mod.queue.rebuild_queue(tree, mod.KIND_SHADER, props, path=path)
+    mod.queue.rebuild_queue(tree, mod.common.KIND_SHADER, props, path=path)
     items = [it for it in mod._state["queue"] if it["node"] == node_name]
     assert items, "%s not queued (queue: %r)" % (node_name, [i["node"] for i in mod._state["queue"]])
     mod._state["queue"][:] = items
@@ -128,12 +128,12 @@ def test_switching_material_context_requeues(mod):
     props = bpy.context.scene.npv
     try:
         _clear_state(mod)
-        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.common.KIND_SHADER, props, path=[m1.node_tree, g])
         assert mod._state["queue"], "nothing queued inside the group"
         _mark_rendered(mod)
-        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.common.KIND_SHADER, props, path=[m1.node_tree, g])
         assert not mod._state["queue"], "same context re-queued"
-        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m2.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.common.KIND_SHADER, props, path=[m2.node_tree, g])
         assert any(it["node"] == "Inner Mix" for it in mod._state["queue"]), \
             "entering the group from another material did not re-queue"
     finally:
@@ -200,7 +200,7 @@ def test_geometry_node_inside_group(mod):
 
     try:
         _clear_state(mod)
-        mod.queue.rebuild_queue(inner, mod.KIND_GEO, props, path=[root, inner])
+        mod.queue.rebuild_queue(inner, mod.common.KIND_GEO, props, path=[root, inner])
         items = [it for it in mod._state["queue"] if it["node"] == "Inner Grid"]
         assert items, "inner geometry node not queued: %r" % [i["node"] for i in mod._state["queue"]]
         mod._state["queue"][:] = items

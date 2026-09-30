@@ -51,12 +51,12 @@ def test_node_feeding_a_zone_and_the_output_is_outside(mod):
         links.new(zo.outputs[0], join_out.inputs[0])
         links.new(grid.outputs[0], join_out.inputs[0])
         links.new(join_out.outputs[0], go.inputs[0])
-        mod._zone_cache.clear()
-        inside = {n.name for n in nodes if mod._in_zone(n)}
+        mod.eligibility._zone_cache.clear()
+        inside = {n.name for n in nodes if mod.eligibility._in_zone(n)}
         assert "JoinIn" in inside and zi.name in inside, inside
         assert not inside & {"Grid", "JoinOut", "Xform", zo.name}, inside
     finally:
-        mod._zone_cache.clear()
+        mod.eligibility._zone_cache.clear()
         bpy.data.node_groups.remove(ng)
 
 
@@ -76,12 +76,12 @@ def test_forgotten_editor_drops_its_queue_and_the_fallback(mod):
     try:
         _clear(mod)
         eds = mod._state["editors"]
-        eds[1] = {"tree": 11, "kind": mod.KIND_SHADER, "path": [11], "hint": [],
+        eds[1] = {"tree": 11, "kind": mod.common.KIND_SHADER, "path": [11], "hint": [],
                   "pinned": False, "ctx": "a", "visible": set(), "priority": set()}
-        eds[2] = {"tree": 22, "kind": mod.KIND_SHADER, "path": [22], "hint": [],
+        eds[2] = {"tree": 22, "kind": mod.common.KIND_SHADER, "path": [22], "hint": [],
                   "pinned": False, "ctx": "b", "visible": set(), "priority": set()}
         mod._state["active_tree_ptr"] = 22
-        mod._state["active_kind"] = mod.KIND_SHADER
+        mod._state["active_kind"] = mod.common.KIND_SHADER
         mod._state["active_path"] = [22]
         keys = ["11:N#a", "22:N#b"]
         for k in keys:
@@ -108,11 +108,11 @@ def test_pruned_editor_drops_its_queue(mod):
     orig = mod.timer._live_space_ptrs
     try:
         _clear(mod)
-        mod._state["editors"][7] = {"tree": 77, "kind": mod.KIND_SHADER, "path": [77],
+        mod._state["editors"][7] = {"tree": 77, "kind": mod.common.KIND_SHADER, "path": [77],
                                     "hint": [], "pinned": False, "ctx": "",
                                     "visible": set(), "priority": set()}
         mod._state["active_tree_ptr"] = 77
-        mod._state["active_kind"] = mod.KIND_SHADER
+        mod._state["active_kind"] = mod.common.KIND_SHADER
         mod._state["active_path"] = [77]
         mod._state["queue"].append(_item("77:N#x"))
         mod._state["queued_keys"].add("77:N#x")

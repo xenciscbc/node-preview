@@ -76,7 +76,7 @@ def test_rebuild_queue_only_requeues_changed(mod):
     st = mod._state
     try:
         nt = mat.node_tree
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         first = {it["node"] for it in st["queue"]}
         assert {"Noise", "Ramp", "Wave", "Out", "BSDF"} <= first, first
 
@@ -87,11 +87,11 @@ def test_rebuild_queue_only_requeues_changed(mod):
         st["queue"].clear()
         st["queued_keys"].clear()
 
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         assert not st["queue"], "unchanged tree re-queued %r" % st["queue"]
 
         nt.nodes["Ramp"].color_ramp.elements[0].color = (0, 1, 0, 1)
-        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.common.KIND_SHADER, props)
         again = {it["node"] for it in st["queue"]}
         assert again == {"Ramp", "BSDF", "Out"}, again
     finally:
