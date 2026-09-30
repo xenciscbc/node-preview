@@ -79,8 +79,8 @@ for the sidebar, and use the **Preview** tab.
 ```
 extension/                        The add-on source (an extension package)
   blender_manifest.toml           Extension manifest: metadata and the version
-  __init__.py                     Add-on entry: register(), queue, timer,
-                                  drawing, operators and UI
+  __init__.py                     Add-on entry: register(), properties,
+                                  operators and UI
   common.py                       Shared constants, runtime state, cache keys
   eligibility.py                  Which nodes / outputs get a preview
   hashing.py                      Content hashes that trigger re-renders
@@ -89,6 +89,11 @@ extension/                        The add-on source (an extension package)
   sources.py                      Which material / object / world a tree shows
   renderers.py                    Render one node's preview (shader, world,
                                   geometry, compositor, node groups)
+  queue.py                        What needs re-rendering, in which order;
+                                  the thumbnail cache
+  timer.py                        Timer that renders the queue; depsgraph /
+                                  frame / load / save handlers
+  drawing.py                      Draws the thumbnails in the node editor
 dist/                             Built zips (not in git; attached to Releases)
 build_extension.py                Zips extension/ into dist/
                                   (gated on the tests below)

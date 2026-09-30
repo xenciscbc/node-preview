@@ -59,7 +59,7 @@ def test_crypto_preview_keeps_user_render_result(mod):
         assert _render_result_size(scene) == (160, 80)
         for node in ("Crypto", "RL"):
             with capture_renders(mod) as shots:
-                assert mod.render_compositor(scene, node, 32, scene.npv)
+                assert mod.renderers.render_compositor(scene, node, 32, scene.npv)
             assert shots, "no preview rendered for %s" % node
             size = _render_result_size(scene)
             assert size == (160, 80), \

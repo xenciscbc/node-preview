@@ -51,15 +51,15 @@ def test_editing_an_earlier_modifiers_tree_changes_the_hash(mod):
     ob.modifiers.new("B", "NODES").node_group = b
     try:
         _clear(mod)
-        before = mod._geo_source_sig(ob.name, b)
+        before = mod.queue._geo_source_sig(ob.name, b)
         a.nodes["Xform"].inputs["Scale"].default_value = (2.0, 2.0, 2.0)
-        assert mod._geo_source_sig(ob.name, b) != before, \
+        assert mod.queue._geo_source_sig(ob.name, b) != before, \
             "editing modifier A's tree did not change B's previews"
         # ... but B's own tree is not part of it (only the edited node and
         # its downstream re-render there).
-        before = mod._geo_source_sig(ob.name, b)
+        before = mod.queue._geo_source_sig(ob.name, b)
         b.nodes["Xform"].inputs["Scale"].default_value = (3.0, 3.0, 3.0)
-        assert mod._geo_source_sig(ob.name, b) == before
+        assert mod.queue._geo_source_sig(ob.name, b) == before
     finally:
         _clear(mod)
         _remove(ob, a, b)
@@ -74,14 +74,14 @@ def test_shape_key_value_and_shape_change_the_fingerprint(mod):
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()
         ref = mod._idref(me)
-        s0 = mod._data_sig(me, ob)
+        s0 = mod.queue._data_sig(me, ob)
         kb.value = 0.6
-        mod._mark_data_changed(ref)
-        s1 = mod._data_sig(me, ob)
+        mod.queue._mark_data_changed(ref)
+        s1 = mod.queue._data_sig(me, ob)
         assert s1 != s0, "shape key value not seen"
         kb.data[0].co = (0.0, 0.0, 1.0)
-        mod._mark_data_changed(ref)
-        assert mod._data_sig(me, ob) != s1, "editing a non-Basis key not seen"
+        mod.queue._mark_data_changed(ref)
+        assert mod.queue._data_sig(me, ob) != s1, "editing a non-Basis key not seen"
         # The update Blender sends for a slider names the Key, whose user is
         # the mesh.
         key = me.shape_keys
@@ -102,14 +102,14 @@ def test_topology_only_edit_changes_the_fingerprint(mod):
     try:
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()
-        s0 = mod._data_sig(me, ob)
+        s0 = mod.queue._data_sig(me, ob)
         me.flip_normals()          # same positions and counts, new winding
-        mod._mark_data_changed(mod._idref(me))
-        assert mod._data_sig(me, ob) != s0, "Flip Normals not seen"
-        s1 = mod._data_sig(me, ob)
+        mod.queue._mark_data_changed(mod._idref(me))
+        assert mod.queue._data_sig(me, ob) != s0, "Flip Normals not seen"
+        s1 = mod.queue._data_sig(me, ob)
         me.vertices[0].select = not me.vertices[0].select
-        mod._mark_data_changed(mod._idref(me))
-        assert mod._data_sig(me, ob) == s1, "selection changed the fingerprint"
+        mod.queue._mark_data_changed(mod._idref(me))
+        assert mod.queue._data_sig(me, ob) == s1, "selection changed the fingerprint"
     finally:
         mod._state["data_sigs"].clear()
         bpy.data.objects.remove(ob)
@@ -128,31 +128,31 @@ def test_editor_is_forgotten_when_it_stops_showing_previews(mod):
     class Ctx:
         space_data, scene = Space(), bpy.context.scene
 
-    saved = mod.bpy
+    saved = mod.drawing.bpy
     try:
         _clear(mod)
         mod._state["editors"][4242] = {"tree": 1, "kind": mod.KIND_SHADER, "path": [1],
                                        "hint": [], "pinned": False,
                                        "visible": set(), "priority": set()}
-        mod.bpy = type("B", (), {"context": Ctx(), "types": bpy.types, "data": bpy.data})
+        mod.drawing.bpy = type("B", (), {"context": Ctx(), "types": bpy.types, "data": bpy.data})
         mod.draw_callback()
         assert 4242 not in mod._state["editors"], "unsupported tree kept being rebuilt"
         # Preview type switched off: its editors are no rebuild targets.
-        mod.bpy = saved
+        mod.drawing.bpy = saved
         props = _props()
         mod._state["editors"][4243] = {"tree": 1, "kind": mod.KIND_GEO, "path": [1],
                                        "hint": [], "pinned": False,
                                        "visible": set(), "priority": set()}
         props.preview_geometry = False
-        orig = mod._live_space_ptrs
-        mod._live_space_ptrs = lambda: None
+        orig = mod.timer._live_space_ptrs
+        mod.timer._live_space_ptrs = lambda: None
         try:
-            targets = mod._editor_targets()
+            targets = mod.timer._editor_targets()
         finally:
-            mod._live_space_ptrs = orig
+            mod.timer._live_space_ptrs = orig
         assert all(t[1] != mod.KIND_GEO for t in targets), targets
     finally:
-        mod.bpy = saved
+        mod.drawing.bpy = saved
         _clear(mod)
 
 
@@ -193,7 +193,7 @@ def test_nodes_inside_a_zone_get_no_preview(mod):
 
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         queued = {it["node"] for it in mod._state["queue"]}
         assert {"Xform", zo.name, "After", "JoinedIn"} <= queued, queued
         assert not queued & inside, "nodes inside the zone queued: %r" % (queued & inside)

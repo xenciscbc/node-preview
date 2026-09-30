@@ -63,7 +63,7 @@ def _render_value(mod, mat):
 
     mod.preview_scene._png_to_texture = spy
     try:
-        assert mod.render_shader(mat, "Src", 32, _props())
+        assert mod.renderers.render_shader(mat, "Src", 32, _props())
     finally:
         mod.preview_scene._png_to_texture = orig
     w, h, px, value = got[0]
@@ -78,40 +78,40 @@ def test_failed_render_is_not_retried_until_it_changes(mod):
     mat = _emission_material("NPV_t140_fail", lambda nt: _math(nt, "ADD", 1, 2))
     props = _props()
     props.only_tex_shader = False
-    orig = mod._render_item
+    orig = mod.queue._render_item
     calls = []
 
     def boom(item, res, p):
         calls.append(item["node"])
         return None
 
-    mod._render_item = boom
+    mod.queue._render_item = boom
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         n = len(mod._state["queue"])
         assert n
         props.batch_size = 8
         props.time_budget = 2000
         while mod._state["queue"]:
-            mod.process_queue(props)
+            mod.queue.process_queue(props)
         assert len(calls) == n and len(mod._state["failed"]) == n
 
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert not mod._state["queue"], "failed renders re-queued with no change"
 
         nt.nodes["Src"].inputs[0].default_value = 5.0
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert any(it["node"] == "Src" for it in mod._state["queue"]), \
             "changed node was not retried"
 
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props, force=True)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props, force=True)
         assert len(mod._state["queue"]) == n, "Refresh did not retry failures"
     finally:
-        mod._render_item = orig
+        mod.queue._render_item = orig
         props.only_tex_shader = True
         props.batch_size = 2
         props.time_budget = 250
@@ -160,11 +160,11 @@ def test_shared_geo_tree_previews_the_hinted_object(mod):
         mod._state["src_hint"] = [("OBJ", b.name)]
         assert mod.resolve_source(ng, mod.KIND_GEO) == ("OBJ", b.name)
 
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"][0]["src"] == b.name
         _mark_rendered(mod)
         mod._state["src_hint"] = [("OBJ", a.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"] and mod._state["queue"][0]["src"] == a.name, \
             "switching the active object did not re-render"
     finally:
@@ -227,14 +227,14 @@ def test_light_tree_is_resolved_and_previewed(mod):
         nt.links.new(emit.outputs[0], out.inputs["Surface"])
 
         assert mod.resolve_source(nt, mod.KIND_SHADER) == ("LIGHT", lt.name)
-        assert nt.as_pointer() in mod._live_tree_pointers()
-        assert mod._tree_by_pointer(nt.as_pointer()) == nt
+        assert nt.as_pointer() in mod.queue._live_tree_pointers()
+        assert mod.sources._tree_by_pointer(nt.as_pointer()) == nt
 
         mod.preview_scene.ensure_preview_scene(32)
         snap = datablock_names()
         with capture_renders(mod) as shots:
-            assert mod.render_shader(lt, "Tint", 32, _props())
-            assert mod.render_shader(lt, "LOut", 32, _props())
+            assert mod.renderers.render_shader(lt, "Tint", 32, _props())
+            assert mod.renderers.render_shader(lt, "LOut", 32, _props())
         r, g, b = mean_rgb(shots[0])
         assert r > g + 0.3 and r > b + 0.3, "light tint swatch not red: %r" % ((r, g, b),)
         assert opaque_rgb(shots[1]), "light output ball is empty"
@@ -243,7 +243,7 @@ def test_light_tree_is_resolved_and_previewed(mod):
                   if set(after[k]) - set(snap[k])}
         assert not leaked, "light preview leaked %r" % leaked
 
-        mod.rebuild_queue(nt, mod.KIND_SHADER, _props())
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, _props())
         assert all(it["src_type"] == "LIGHT" for it in mod._state["queue"])
     finally:
         _clear(mod)
@@ -260,7 +260,7 @@ def test_load_render_matches_pixels(mod):
         orig = mod.preview_scene._png_to_texture
         mod.preview_scene._png_to_texture = lambda p: path.append(p) or True
         try:
-            mod.render_shader(mat, mat.node_tree.nodes[0].name, 32, _props())
+            mod.renderers.render_shader(mat, mat.node_tree.nodes[0].name, 32, _props())
         finally:
             mod.preview_scene._png_to_texture = orig
         ref = load_pixels(path[0])
@@ -328,10 +328,10 @@ def test_process_queue_stores_the_value(mod):
     mod.preview_scene._png_to_texture = fake
     try:
         _clear(mod)
-        mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
         mod._state["queue"][:] = [it for it in mod._state["queue"] if it["node"] == "Src"]
         mod._state["queued_keys"] = {it["key"] for it in mod._state["queue"]}
-        mod.process_queue(props)
+        mod.queue.process_queue(props)
         vals = list(mod._state["values"].values())
         assert len(vals) == 1 and abs(vals[0] - 1.75) < 1e-3, vals
     finally:
@@ -355,7 +355,7 @@ def test_compositor_render_is_png_even_if_scene_saves_exr(mod):
     orig = mod.preview_scene._png_to_texture
     mod.preview_scene._png_to_texture = lambda p: paths.append(p) or True
     try:
-        assert mod.render_compositor(scn, "RGB", 32, _props())
+        assert mod.renderers.render_compositor(scn, "RGB", 32, _props())
     finally:
         mod.preview_scene._png_to_texture = orig
         bpy.data.scenes.remove(scn)
@@ -373,7 +373,7 @@ def test_queue_renders_priority_then_visible_first(mod):
     st["queued_keys"] = {"a", "b", "c", "d"}
     st["visible"] = {"c"}
     st["priority"] = {"d"}
-    order = [mod._pop_next()["key"] for _ in range(4)]
+    order = [mod.queue._pop_next()["key"] for _ in range(4)]
     assert order == ["d", "c", "a", "b"], order
     assert not st["queued_keys"]
     _clear(mod)
@@ -382,7 +382,7 @@ def test_queue_renders_priority_then_visible_first(mod):
 def test_time_budget_stops_the_step_early(mod):
     st = mod._state
     props = _props()
-    orig = mod._render_item
+    orig = mod.queue._render_item
     calls = []
 
     def slow(item, res, p):
@@ -390,20 +390,20 @@ def test_time_budget_stops_the_step_early(mod):
         time.sleep(0.06)
         return object()
 
-    mod._render_item = slow
+    mod.queue._render_item = slow
     try:
         _clear(mod)
         st["queue"][:] = [{"key": "%d:n%d|" % (1, i), "node": "n%d" % i, "hash": "h",
                            "kind": mod.KIND_SHADER} for i in range(6)]
         props.batch_size = 6
         props.time_budget = 50
-        mod.process_queue(props)
+        mod.queue.process_queue(props)
         assert len(calls) == 1, "budget ignored: %d renders" % len(calls)
         props.time_budget = 2000
-        mod.process_queue(props)
+        mod.queue.process_queue(props)
         assert len(calls) == 6, "batch size not honoured: %d" % len(calls)
     finally:
-        mod._render_item = orig
+        mod.queue._render_item = orig
         props.batch_size = 2
         props.time_budget = 250
         _clear(mod)
@@ -438,10 +438,10 @@ def test_transform_only_object_update_is_ignored(mod):
 
 
 def test_timer_pauses_during_playback(mod):
-    orig_play, orig_rebuild = mod._animation_playing, mod.rebuild_queue
+    orig_play, orig_rebuild = mod.timer._animation_playing, mod.queue.rebuild_queue
     rebuilt = []
-    mod._animation_playing = lambda: True
-    mod.rebuild_queue = lambda *a, **k: rebuilt.append(1)
+    mod.timer._animation_playing = lambda: True
+    mod.queue.rebuild_queue = lambda *a, **k: rebuilt.append(1)
     props = _props()
     try:
         mod._state["dirty"] = True
@@ -452,8 +452,8 @@ def test_timer_pauses_during_playback(mod):
         assert not mod._state["dirty"], "Update on Frame Change did not keep working"
     finally:
         props.update_on_frame = False
-        mod._animation_playing = orig_play
-        mod.rebuild_queue = orig_rebuild
+        mod.timer._animation_playing = orig_play
+        mod.queue.rebuild_queue = orig_rebuild
 
 
 def test_update_on_frame_puts_the_frame_in_the_hash(mod):
@@ -464,19 +464,19 @@ def test_update_on_frame_puts_the_frame_in_the_hash(mod):
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         _mark_rendered(mod)
         scn.frame_set(f0 + 3)
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert not mod._state["queue"], "frame change re-rendered with the option off"
         props.update_on_frame = True
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         _mark_rendered(mod)
         scn.frame_set(f0 + 4)
         mod._state["dirty"] = False
         mod._on_frame_change(scn)
         assert mod._state["dirty"]
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert mod._state["queue"], "frame change did not re-render with the option on"
     finally:
         props.update_on_frame = False
@@ -495,20 +495,20 @@ def test_cube_shape_renders_and_is_hidden_afterwards(mod):
     try:
         out = next(n for n in mat.node_tree.nodes if n.bl_idname == "ShaderNodeOutputMaterial")
         with capture_renders(mod) as shots:
-            assert mod.render_shader(mat, out.name, 48, props)
+            assert mod.renderers.render_shader(mat, out.name, 48, props)
         px = opaque_rgb(shots[0])
         assert px, "cube render is empty"
-        cube = bpy.data.objects.get(mod.PREVIEW_CUBE)
+        cube = bpy.data.objects.get(mod.common.PREVIEW_CUBE)
         assert cube is not None and cube.hide_render, "cube left visible"
         assert not cube.data.materials or cube.data.materials[0] is None
         # A texture swatch still uses the plane, not the cube.
         with capture_renders(mod) as shots:
-            mod.render_shader(mat, out.name, 48, props)
+            mod.renderers.render_shader(mat, out.name, 48, props)
     finally:
         props.shader_shape = "SPHERE"
         bpy.data.materials.remove(mat)
     mod._cleanup_datablocks()
-    assert bpy.data.objects.get(mod.PREVIEW_CUBE) is None, "cleanup kept the cube"
+    assert bpy.data.objects.get(mod.common.PREVIEW_CUBE) is None, "cleanup kept the cube"
 
 
 def test_hdri_environment_lights_the_ball_and_is_cleaned_up(mod):
@@ -524,10 +524,10 @@ def test_hdri_environment_lights_the_ball_and_is_cleaned_up(mod):
     try:
         out = next(n for n in mat.node_tree.nodes if n.bl_idname == "ShaderNodeOutputMaterial")
         with capture_renders(mod) as shots:
-            assert mod.render_shader(mat, out.name, 48, props)
+            assert mod.renderers.render_shader(mat, out.name, 48, props)
         assert opaque_rgb(shots[0])
-        assert bpy.data.images.get(mod.ENV_IMAGE_PREFIX + env) is not None
-        wnt = bpy.data.scenes[mod.PREVIEW_SCENE].world.node_tree
+        assert bpy.data.images.get(mod.common.ENV_IMAGE_PREFIX + env) is not None
+        wnt = bpy.data.scenes[mod.common.PREVIEW_SCENE].world.node_tree
         assert wnt.nodes.get("NPV_env") is not None
         props.preview_env = "UNIFORM"
         mod.preview_scene.ensure_preview_scene(32)
@@ -536,14 +536,14 @@ def test_hdri_environment_lights_the_ball_and_is_cleaned_up(mod):
         props.preview_env = "UNIFORM"
         bpy.data.materials.remove(mat)
     mod._cleanup_datablocks()
-    assert not [i for i in bpy.data.images if i.name.startswith(mod.ENV_IMAGE_PREFIX)]
+    assert not [i for i in bpy.data.images if i.name.startswith(mod.common.ENV_IMAGE_PREFIX)]
 
 
 def test_environment_and_shape_are_in_the_light_signature(mod):
     props = _props()
-    a = mod._light_sig(props)
+    a = mod.queue._light_sig(props)
     props.shader_shape = "CUBE"
-    b = mod._light_sig(props)
+    b = mod.queue._light_sig(props)
     props.shader_shape = "SPHERE"
     assert a != b
 
@@ -562,7 +562,7 @@ def test_export_job_writes_a_png(mod):
         assert job and job["src"] == mat.name
         mod._state["export_to"] = fp
         try:
-            assert mod._render_item(job, 64, _props())
+            assert mod.queue._render_item(job, 64, _props())
         finally:
             mod._state["export_to"] = None
         assert os.path.isfile(fp), "export wrote nothing"
@@ -589,25 +589,25 @@ def test_export_operator_is_registered(mod):
 # --------------------------------------------------------------------------- #
 def test_grid_origin_positions(mod):
     x0, x1, y0, nh, gw, gh, gap = 100.0, 200.0, 500.0, 80.0, 100.0, 100.0, 6.0
-    assert mod._grid_origin("ABOVE", x0, x1, y0, nh, gw, gh, gap) == (100.0, 506.0)
-    assert mod._grid_origin("BELOW", x0, x1, y0, nh, gw, gh, gap) == (100.0, 314.0)
-    assert mod._grid_origin("LEFT", x0, x1, y0, nh, gw, gh, gap) == (-6.0, 400.0)
-    assert mod._grid_origin("RIGHT", x0, x1, y0, nh, gw, gh, gap) == (206.0, 400.0)
+    assert mod.drawing._grid_origin("ABOVE", x0, x1, y0, nh, gw, gh, gap) == (100.0, 506.0)
+    assert mod.drawing._grid_origin("BELOW", x0, x1, y0, nh, gw, gh, gap) == (100.0, 314.0)
+    assert mod.drawing._grid_origin("LEFT", x0, x1, y0, nh, gw, gh, gap) == (-6.0, 400.0)
+    assert mod.drawing._grid_origin("RIGHT", x0, x1, y0, nh, gw, gh, gap) == (206.0, 400.0)
     # A bigger grid stays centred over the node.
-    assert mod._grid_origin("ABOVE", x0, x1, y0, nh, 200.0, gh, gap)[0] == 50.0
+    assert mod.drawing._grid_origin("ABOVE", x0, x1, y0, nh, 200.0, gh, gap)[0] == 50.0
 
 
 def test_checker_covers_half_the_cell(mod):
-    tris = mod._checker_tris(0, 0, 64, 64, 8)
+    tris = mod.drawing._checker_tris(0, 0, 64, 64, 8)
     assert len(tris) == 32 * 6
     assert all(0 <= x <= 64 and 0 <= y <= 64 for x, y in tris)
 
 
 def test_format_value(mod):
-    assert mod.format_value(5.0) == "5"
-    assert mod.format_value(-2.5) == "-2.5"
-    assert mod.format_value(-1e-9) == "0"
-    assert mod.format_value(1 / 3) == "0.3333"
+    assert mod.drawing.format_value(5.0) == "5"
+    assert mod.drawing.format_value(-2.5) == "-2.5"
+    assert mod.drawing.format_value(-1e-9) == "0"
+    assert mod.drawing.format_value(1 / 3) == "0.3333"
 
 
 def test_new_strings_translated_and_display_page(mod):
@@ -668,14 +668,14 @@ def test_draw_callback_smoke(mod):
                                                 bpy.path, bpy.props, bpy.utils)
         context = Ctx()
 
-    saved = {k: getattr(mod, k) for k in ("bpy", "gpu", "blf", "batch_for_shader")}
+    saved = {k: getattr(mod.drawing, k) for k in ("bpy", "gpu", "blf", "batch_for_shader")}
     try:
         _clear(mod)
         nodes = list(nt.nodes)
         for i, n in enumerate(nodes):
             n.location = (i * 300.0, 200.0)
         nt.nodes.active = nt.nodes["Src"]
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         keys = [it["key"] for it in mod._state["queue"]]
         src_key = next(it["key"] for it in mod._state["queue"] if it["node"] == "Src")
         # Src rendered with a number; one failed; the rest still queued.
@@ -688,17 +688,17 @@ def test_draw_callback_smoke(mod):
         props.checker_bg = True
         for pos in ("ABOVE", "BELOW", "LEFT", "RIGHT"):
             props.thumb_position = pos
-            mod.bpy, mod.gpu, mod.blf = Bpy, _Rec(log), _Rec(log)
-            mod.batch_for_shader = _Rec(log, "batch")
+            mod.drawing.bpy, mod.drawing.gpu, mod.drawing.blf = Bpy, _Rec(log), _Rec(log)
+            mod.drawing.batch_for_shader = _Rec(log, "batch")
             mod.draw_callback()
-            mod.bpy = saved["bpy"]
+            mod.drawing.bpy = saved["bpy"]
         assert "draw" in log and "position" in log, sorted(set(log))
         assert set(keys) <= mod._state["visible"], "on-screen nodes not recorded"
         assert src_key in mod._state["priority"], "active node not prioritised"
         assert mod._state["src_hint"] == [("MAT", mat.name)]
     finally:
         for k, v in saved.items():
-            setattr(mod, k, v)
+            setattr(mod.drawing, k, v)
         props.thumb_position = "ABOVE"
         props.zoom_active = False
         props.checker_bg = False
@@ -777,11 +777,11 @@ def test_queued_item_follows_a_source_switch(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", b.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"][0]["src"] == b.name
         # Switch before anything rendered: the waiting item must follow.
         mod._state["src_hint"] = [("OBJ", a.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert len(mod._state["queue"]) == 1
         assert mod._state["queue"][0]["src"] == a.name, \
             "queued item kept the old source under the new hash"
@@ -811,27 +811,27 @@ def test_pinned_editor_keeps_its_own_hint(mod):
     try:
         _clear(mod)
         mod._state["editors"].clear()
-        mod._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
-        mod._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
+        mod.drawing._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
+        mod.drawing._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
         # The pinned editor ignores the active object and doesn't set the
         # global hint; redrawing both in turn no longer marks anything dirty.
         assert mod._state["editors"][1001]["hint"] == [("OBJ", a.name)]
         assert mod._state["src_hint"] == [("OBJ", b.name)]
         mod._state["dirty"] = False
         for _ in range(3):
-            mod._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
-            mod._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
+            mod.drawing._record_editor(ctx, pinned, tp, mod.KIND_GEO, [tp], props, ng)
+            mod.drawing._record_editor(ctx, unpinned, tp, mod.KIND_GEO, [tp], props, ng)
         assert not mod._state["dirty"], "two editors keep re-queueing each other"
         # Sharing one tree, both are rebuilt, each through its own object:
         # the source is part of the cache key, so they don't collide.
         # (Editors of a preview type that is off are no targets.)
         props.preview_geometry = True
-        orig = mod._live_space_ptrs
-        mod._live_space_ptrs = lambda: None
+        orig = mod.timer._live_space_ptrs
+        mod.timer._live_space_ptrs = lambda: None
         try:
-            targets = mod._editor_targets()
+            targets = mod.timer._editor_targets()
         finally:
-            mod._live_space_ptrs = orig
+            mod.timer._live_space_ptrs = orig
         assert sorted(repr(t[3]) for t in targets) == sorted(
             [repr([("OBJ", a.name)]), repr([("OBJ", b.name)])]), targets
     finally:
@@ -852,12 +852,12 @@ def test_undo_to_the_shown_thumbnail_clears_the_failure(mod):
     try:
         _clear(mod)
         nt = mat.node_tree
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         _mark_rendered(mod)
         key = next(k for k in mod._state["textures"] if k.split(":", 1)[1].startswith("Src|"))
         # An edit whose render failed, then undone.
         mod._state["failed"][key] = "hash-of-the-failing-edit"
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert not mod._state["queue"]
         assert key not in mod._state["failed"], "stale failure marker kept after undo"
     finally:

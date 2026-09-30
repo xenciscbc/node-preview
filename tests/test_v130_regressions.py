@@ -19,12 +19,12 @@ def _rgb_material():
 def test_rgb_and_value_changes_change_the_hash(mod):
     mat, rgb, val, emit = _rgb_material()
     try:
-        h0 = mod.upstream_hash(emit, {})
+        h0 = mod.hashing.upstream_hash(emit, {})
         rgb.outputs[0].default_value = (0.1, 0.8, 0.2, 1.0)
-        h1 = mod.upstream_hash(emit, {})
+        h1 = mod.hashing.upstream_hash(emit, {})
         assert h1 != h0, "changing an RGB node's colour did not change the hash"
         val.outputs[0].default_value = 3.0
-        h2 = mod.upstream_hash(emit, {})
+        h2 = mod.hashing.upstream_hash(emit, {})
         assert h2 != h1, "changing a Value node did not change the hash"
     finally:
         bpy.data.materials.remove(mat)
@@ -37,9 +37,9 @@ def test_rgb_change_inside_group_changes_group_signature(mod):
     go = g.nodes.new("NodeGroupOutput")
     g.links.new(rgb.outputs[0], go.inputs[0])
     try:
-        s0 = mod.tree_signature(g)
+        s0 = mod.hashing.tree_signature(g)
         rgb.outputs[0].default_value = (0.9, 0.1, 0.1, 1.0)
-        assert mod.tree_signature(g) != s0, "RGB change inside a group not detected"
+        assert mod.hashing.tree_signature(g) != s0, "RGB change inside a group not detected"
     finally:
         bpy.data.node_groups.remove(g)
 
@@ -58,7 +58,7 @@ def test_compositor_rgb_change_requeues(mod):
     try:
         for k in ("textures", "hashes", "queue", "queued_keys"):
             st[k].clear()
-        mod.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
+        mod.queue.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
         assert any(it["node"] == "RGB" for it in st["queue"]), "RGB not queued"
         for it in st["queue"]:
             st["textures"][it["key"]] = object()
@@ -66,7 +66,7 @@ def test_compositor_rgb_change_requeues(mod):
         st["queue"].clear()
         st["queued_keys"].clear()
         rgb.outputs[0].default_value = (0.1, 0.1, 0.9, 1.0)
-        mod.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
+        mod.queue.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
         assert any(it["node"] == "RGB" for it in st["queue"]), \
             "RGB colour change did not re-queue its preview"
     finally:
@@ -87,15 +87,15 @@ def test_timer_redraws_after_dropping_thumbnails(mod):
     scene.compositing_node_group = tree
     st = mod._state
     calls = []
-    orig = (mod._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
+    orig = (mod.queue._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
             props.enabled, props.auto_update, props.comp_groups)
     try:
         for k in ("textures", "hashes", "queue", "queued_keys"):
             st[k].clear()
-        st["textures"][mod._skey(grp, "Inner", None)] = object()
+        st["textures"][mod.common._skey(grp, "Inner", None)] = object()
         props.enabled = props.auto_update = True
         props.comp_groups = False
-        mod._tag_node_editors = lambda: calls.append(1)
+        mod.queue._tag_node_editors = lambda: calls.append(1)
         mod.sources._resolve_active = lambda: (grp, mod.KIND_COMP, [tree, grp])
         mod.sources._kind_enabled = lambda kind, p: True
         st["dirty"] = True
@@ -103,7 +103,7 @@ def test_timer_redraws_after_dropping_thumbnails(mod):
         assert not st["textures"], "group thumbnail not dropped"
         assert calls, "thumbnails dropped without redrawing the node editors"
     finally:
-        (mod._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
+        (mod.queue._tag_node_editors, mod.sources._resolve_active, mod.sources._kind_enabled,
          props.enabled, props.auto_update, props.comp_groups) = orig
         for k in ("textures", "hashes", "queue", "queued_keys"):
             st[k].clear()

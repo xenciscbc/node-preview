@@ -43,8 +43,8 @@ def _render_pair(mod, setup):
     bpy.context.view_layer.update()
     try:
         with capture_renders(mod) as shots:
-            assert mod.render_geo(ob, "Cube", 48, _props())
-            assert mod.render_geo(ob2, "Cube", 48, _props())
+            assert mod.renderers.render_geo(ob, "Cube", 48, _props())
+            assert mod.renderers.render_geo(ob2, "Cube", 48, _props())
     finally:
         _remove_geo(ob, ng)
         _remove_geo(ob2, ng2)

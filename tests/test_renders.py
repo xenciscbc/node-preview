@@ -15,11 +15,11 @@ def test_shader_ball_renders(mod):
         out = next(n for n in mat.node_tree.nodes
                    if n.bl_idname == "ShaderNodeOutputMaterial")
         with capture_renders(mod) as shots:
-            assert mod.render_shader(mat, out.name, 48, _props())
+            assert mod.renderers.render_shader(mat, out.name, 48, _props())
         assert opaque_rgb(shots[0]), "material ball render is empty"
     finally:
         bpy.data.materials.remove(mat)
-    assert bpy.data.materials.get(mod.PREVIEW_MAT_TMP) is None, "temp material leaked"
+    assert bpy.data.materials.get(mod.common.PREVIEW_MAT_TMP) is None, "temp material leaked"
 
 
 def test_world_swatch_renders_and_restores_scene(mod):
@@ -34,13 +34,13 @@ def test_world_swatch_renders_and_restores_scene(mod):
         before = (cam.data.type, tuple(cam.location), scn.world.name,
                   scn.render.film_transparent, plane.hide_render, sphere.hide_render)
         with capture_renders(mod) as shots:
-            assert mod.render_world(world, "RGB", 48, _props())
+            assert mod.renderers.render_world(world, "RGB", 48, _props())
         r, g, b = mean_rgb(shots[0])
         assert g > r + 0.2 and g > b + 0.2, "world swatch not green: %r" % ((r, g, b),)
         after = (cam.data.type, tuple(cam.location), scn.world.name,
                  scn.render.film_transparent, plane.hide_render, sphere.hide_render)
         assert after == before, "preview scene not restored: %r -> %r" % (before, after)
-        assert bpy.data.worlds.get(mod.PREVIEW_PREV_WORLD) is None, "temp world leaked"
+        assert bpy.data.worlds.get(mod.common.PREVIEW_PREV_WORLD) is None, "temp world leaked"
     finally:
         bpy.data.worlds.remove(world)
 
@@ -74,11 +74,11 @@ def test_geometry_renders_without_leaks(mod):
         mod.preview_scene.ensure_preview_scene(48)
         snap = datablock_names()
         with capture_renders(mod) as shots:
-            assert mod.render_geo(ob, "Cube", 48, _props())
+            assert mod.renderers.render_geo(ob, "Cube", 48, _props())
         assert opaque_rgb(shots[0]), "geometry render is empty"
         after = datablock_names()
         # The clay material is a cached helper, created once.
-        after["materials"] = [m for m in after["materials"] if m != mod.GEO_CLAY_MAT]
+        after["materials"] = [m for m in after["materials"] if m != mod.common.GEO_CLAY_MAT]
         leaked = {k: sorted(set(after[k]) - set(snap[k])) for k in after
                   if set(after[k]) - set(snap[k])}
         assert not leaked, "render_geometry leaked datablocks: %r" % leaked
@@ -92,7 +92,7 @@ def test_geometry_clay_render_is_shaded(mod):
     ob, ng = _geo_object()
     try:
         with capture_renders(mod) as shots:
-            assert mod.render_geo(ob, "Cube", 64, _props())
+            assert mod.renderers.render_geo(ob, "Cube", 64, _props())
     finally:
         _remove_geo(ob, ng)
     lum = sorted(sum(p) / 3 for p in opaque_rgb(shots[0]))
@@ -107,7 +107,7 @@ def test_geometry_field_swatch_has_texture(mod):
     ob, ng = _geo_object()
     try:
         with capture_renders(mod) as shots:
-            assert mod.render_geo(ob, "Noise", 48, _props())
+            assert mod.renderers.render_geo(ob, "Noise", 48, _props())
         std = color_std(shots[0])
         assert std > 0.02, "noise field swatch is flat (std=%.4f)" % std
     finally:
@@ -146,7 +146,7 @@ def test_compositor_renders_on_a_copy(mod):
         tstate = _tree_state(tree)
         snap = datablock_names()
         with capture_renders(mod) as shots:
-            assert mod.render_compositor(scene, "RGB", 32, _props())
+            assert mod.renderers.render_compositor(scene, "RGB", 32, _props())
         cr, cg, cb = mean_rgb(shots[0])
         assert cr > cg + 0.3 and cr > cb + 0.3, "compositor swatch not red: %r" % ((cr, cg, cb),)
 

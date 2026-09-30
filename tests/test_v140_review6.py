@@ -17,12 +17,12 @@ def _clear(mod):
 def test_timer_drops_an_editor_switched_to_another_tree_type(mod):
     st = mod._state
     props = _props()
-    orig = mod._live_space_ptrs, mod._live_space_kinds, mod._render_item
+    orig = mod.timer._live_space_ptrs, mod.timer._live_space_kinds, mod.queue._render_item
     rendered = []
-    mod._live_space_ptrs = lambda: {777}
+    mod.timer._live_space_ptrs = lambda: {777}
     # Same space pointer, but it now shows a Texture Node tree.
-    mod._live_space_kinds = lambda: {777: None}
-    mod._render_item = lambda item, res, p: rendered.append(item["key"]) or object()
+    mod.timer._live_space_kinds = lambda: {777: None}
+    mod.queue._render_item = lambda item, res, p: rendered.append(item["key"]) or object()
     try:
         _clear(mod)
         st["editors"][777] = {"tree": 5, "kind": mod.KIND_GEO, "path": [5], "hint": [],
@@ -36,24 +36,24 @@ def test_timer_drops_an_editor_switched_to_another_tree_type(mod):
         assert not rendered, "rendered %r for an editor that switched away" % rendered
         assert 777 not in st["editors"] and not st["queue"]
     finally:
-        mod._live_space_ptrs, mod._live_space_kinds, mod._render_item = orig
+        mod.timer._live_space_ptrs, mod.timer._live_space_kinds, mod.queue._render_item = orig
         _clear(mod)
 
 
 def test_editor_switched_to_another_kind_is_forgotten(mod):
     st = mod._state
-    orig = mod._live_space_ptrs, mod._live_space_kinds
-    mod._live_space_ptrs = lambda: {778, 779}
-    mod._live_space_kinds = lambda: {778: mod.KIND_SHADER, 779: mod.KIND_GEO}
+    orig = mod.timer._live_space_ptrs, mod.timer._live_space_kinds
+    mod.timer._live_space_ptrs = lambda: {778, 779}
+    mod.timer._live_space_kinds = lambda: {778: mod.KIND_SHADER, 779: mod.KIND_GEO}
     try:
         _clear(mod)
         for k in (778, 779):
             st["editors"][k] = {"tree": k, "kind": mod.KIND_GEO, "path": [k], "hint": [],
                                 "pinned": False, "visible": set(), "priority": set()}
-        mod._prune_editors()
+        mod.timer._prune_editors()
         assert set(st["editors"]) == {779}, set(st["editors"])
     finally:
-        mod._live_space_ptrs, mod._live_space_kinds = orig
+        mod.timer._live_space_ptrs, mod.timer._live_space_kinds = orig
         _clear(mod)
 
 
@@ -81,7 +81,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert {"Noise", "Math", "Comb", "SP"} <= {it["node"] for it in mod._state["queue"]}
         for it in mod._state["queue"]:
             mod._state["textures"][it["key"]] = object()
@@ -90,7 +90,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
         mod._state["queued_keys"].clear()
 
         noise.inputs["Scale"].default_value = 9.0
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         again = {it["node"] for it in mod._state["queue"]}
         # Noise's own swatch and the geometry downstream change; Math / Comb
         # render with their own input values and can't.
@@ -102,7 +102,7 @@ def test_upstream_edit_does_not_rerender_a_geo_field_swatch(mod):
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
         math.inputs[1].default_value = 0.7        # the swatch's own input
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert {it["node"] for it in mod._state["queue"]} == {"Math", "SP"}
     finally:
         props.preview_geometry = False

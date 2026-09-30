@@ -25,7 +25,7 @@ def _material():
 
 def _hashes(mod, nt):
     memo = {}
-    return {n.name: mod.upstream_hash(n, memo) for n in nt.nodes}
+    return {n.name: mod.hashing.upstream_hash(n, memo) for n in nt.nodes}
 
 
 def test_upstream_hash_tracks_upstream_only(mod):
@@ -58,14 +58,14 @@ def test_tree_signature(mod):
     mat = _material()
     try:
         nt = mat.node_tree
-        sig = mod.tree_signature(nt)
+        sig = mod.hashing.tree_signature(nt)
         nt.nodes["Wave"].location.y -= 100
-        assert mod.tree_signature(nt) == sig, "moving a node changed the signature"
+        assert mod.hashing.tree_signature(nt) == sig, "moving a node changed the signature"
         nt.nodes["Wave"].mute = True
-        s2 = mod.tree_signature(nt)
+        s2 = mod.hashing.tree_signature(nt)
         assert s2 != sig, "mute not detected"
         nt.links.new(nt.nodes["Wave"].outputs["Color"], nt.nodes["BSDF"].inputs["Color"])
-        assert mod.tree_signature(nt) != s2, "relink not detected"
+        assert mod.hashing.tree_signature(nt) != s2, "relink not detected"
     finally:
         bpy.data.materials.remove(mat)
 
@@ -76,7 +76,7 @@ def test_rebuild_queue_only_requeues_changed(mod):
     st = mod._state
     try:
         nt = mat.node_tree
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         first = {it["node"] for it in st["queue"]}
         assert {"Noise", "Ramp", "Wave", "Out", "BSDF"} <= first, first
 
@@ -87,11 +87,11 @@ def test_rebuild_queue_only_requeues_changed(mod):
         st["queue"].clear()
         st["queued_keys"].clear()
 
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert not st["queue"], "unchanged tree re-queued %r" % st["queue"]
 
         nt.nodes["Ramp"].color_ramp.elements[0].color = (0, 1, 0, 1)
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         again = {it["node"] for it in st["queue"]}
         assert again == {"Ramp", "BSDF", "Out"}, again
     finally:

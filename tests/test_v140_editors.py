@@ -69,8 +69,8 @@ def _teardown(mod, mat, ng, ob):
 
 def _draw_both(mod, props, mat, ng, shader, geo):
     mp, gp = mat.node_tree.as_pointer(), ng.as_pointer()
-    mod._record_editor(_Ctx(), shader, mp, mod.KIND_SHADER, [mp], props, mat.node_tree)
-    mod._record_editor(_Ctx(), geo, gp, mod.KIND_GEO, [gp], props, ng)
+    mod.drawing._record_editor(_Ctx(), shader, mp, mod.KIND_SHADER, [mp], props, mat.node_tree)
+    mod.drawing._record_editor(_Ctx(), geo, gp, mod.KIND_GEO, [gp], props, ng)
 
 
 def test_alternating_editors_do_not_mark_dirty(mod):
@@ -98,9 +98,9 @@ def test_timer_rebuilds_every_editor(mod):
     props.preview_geometry = True
     props.only_tex_shader = True
     mat, ng, ob, shader, geo = _setup(mod)
-    orig = mod.process_queue, mod._live_space_ptrs
-    mod.process_queue = lambda p: False
-    mod._live_space_ptrs = lambda: {501, 502}
+    orig = mod.queue.process_queue, mod.timer._live_space_ptrs
+    mod.queue.process_queue = lambda p: False
+    mod.timer._live_space_ptrs = lambda: {501, 502}
     try:
         _draw_both(mod, props, mat, ng, shader, geo)
         mod._state["dirty"] = True
@@ -125,7 +125,7 @@ def test_timer_rebuilds_every_editor(mod):
         assert [it["node"] for it in mod._state["queue"]] == ["Noise"], \
             [it["node"] for it in mod._state["queue"]]
     finally:
-        mod.process_queue, mod._live_space_ptrs = orig
+        mod.queue.process_queue, mod.timer._live_space_ptrs = orig
         props.preview_geometry = False
         _teardown(mod, mat, ng, ob)
 
@@ -133,15 +133,15 @@ def test_timer_rebuilds_every_editor(mod):
 def test_closed_editor_is_forgotten(mod):
     props = _props()
     mat, ng, ob, shader, geo = _setup(mod)
-    orig = mod._live_space_ptrs
+    orig = mod.timer._live_space_ptrs
     try:
         _draw_both(mod, props, mat, ng, shader, geo)
-        mod._live_space_ptrs = lambda: {502}
-        targets = mod._editor_targets()
+        mod.timer._live_space_ptrs = lambda: {502}
+        targets = mod.timer._editor_targets()
         assert set(mod._state["editors"]) == {502}
         assert [t[1] for t in targets] == [mod.KIND_GEO], targets
     finally:
-        mod._live_space_ptrs = orig
+        mod.timer._live_space_ptrs = orig
         _teardown(mod, mat, ng, ob)
 
 
@@ -149,22 +149,22 @@ def test_prune_keeps_every_editors_thumbnails(mod):
     props = _props()
     mat, ng, ob, shader, geo = _setup(mod)
     prefs = bpy.context.preferences.addons.get(mod.__name__)
-    orig_max = mod._max_textures
-    mod._max_textures = lambda: 16
+    orig_max = mod.queue._max_textures
+    mod.queue._max_textures = lambda: 16
     try:
         _draw_both(mod, props, mat, ng, shader, geo)
         st = mod._state
         mine = []
         for tree in (mat.node_tree, ng):
             for i in range(10):
-                k = mod._skey(tree, "n%d" % i, None)
+                k = mod.common._skey(tree, "n%d" % i, None)
                 st["textures"][k] = object()
                 mine.append(k)
         # Other, older thumbnails of a live tree that no editor shows.
         other = bpy.data.materials.new("NPV_ted_other")
         try:
             for i in range(10):
-                k = mod._skey(other.node_tree, "o%d" % i, None)
+                k = mod.common._skey(other.node_tree, "o%d" % i, None)
                 st["textures"][k] = object()
             mod._prune_cache()
             assert all(k in st["textures"] for k in mine), \
@@ -172,7 +172,7 @@ def test_prune_keeps_every_editors_thumbnails(mod):
         finally:
             bpy.data.materials.remove(other)
     finally:
-        mod._max_textures = orig_max
+        mod.queue._max_textures = orig_max
         _teardown(mod, mat, ng, ob)
 
 
@@ -190,7 +190,7 @@ def test_render_order_merges_every_editor(mod):
     st["visible"], st["priority"] = vis, pri
     st["queue"][:] = [{"key": k, "node": k} for k in ("x", "a", "b", "c")]
     st["queued_keys"] = {"x", "a", "b", "c"}
-    order = [mod._pop_next()["key"] for _ in range(4)]
+    order = [mod.queue._pop_next()["key"] for _ in range(4)]
     assert order == ["c", "a", "b", "x"], order
     st["editors"].clear()
     mod._reset_cache()

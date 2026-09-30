@@ -56,9 +56,9 @@ def test_second_gn_modifier_previews_its_own_tree(mod):
     props = bpy.context.scene.npv
     try:
         got_b = _rendered_vertex_counts(
-            mod, lambda: mod.render_geo(ob, "Shape", 32, props, tree=ng_b))
+            mod, lambda: mod.renderers.render_geo(ob, "Shape", 32, props, tree=ng_b))
         got_a = _rendered_vertex_counts(
-            mod, lambda: mod.render_geo(ob, "Shape", 32, props, tree=ng_a))
+            mod, lambda: mod.renderers.render_geo(ob, "Shape", 32, props, tree=ng_a))
     finally:
         bpy.data.objects.remove(ob)
         bpy.data.meshes.remove(me)
@@ -77,7 +77,7 @@ def test_queue_carries_the_tree(mod):
     ob.modifiers.new("Q", "NODES").node_group = ng
     st = mod._state
     try:
-        mod.rebuild_queue(ng, mod.KIND_GEO, bpy.context.scene.npv, force=True)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, bpy.context.scene.npv, force=True)
         assert st["queue"], "nothing queued"
         assert all(it.get("tree") == ng.name for it in st["queue"]), st["queue"]
     finally:
@@ -104,7 +104,9 @@ def test_preview_scene_is_not_saved(mod):
 
 def test_preview_scene_from_old_file_is_removed_on_load(mod):
     # Simulate a file saved by an older version (no save_pre cleanup).
-    saved = [h for h in bpy.app.handlers.save_pre if h.__module__ == mod.__name__]
+    saved = [h for h in bpy.app.handlers.save_pre
+             if h.__module__ == mod.__name__ or h.__module__.startswith(mod.__name__ + ".")]
+    assert saved, "the add-on's save_pre handler was not found"
     for h in saved:
         bpy.app.handlers.save_pre.remove(h)
     try:
@@ -147,7 +149,7 @@ def test_compositor_preview_uses_low_samples(mod):
             scene.eevee.taa_render_samples = 512
             scene.render.use_motion_blur = True
             try:
-                mod.render_compositor(scene, "RL", 32, scene.npv)
+                mod.renderers.render_compositor(scene, "RL", 32, scene.npv)
             except RuntimeError:
                 pass
     finally:
@@ -172,14 +174,14 @@ def test_quality_change_requeues(mod):
     st = mod._state
     old = props.resolution
     try:
-        mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
         for it in st["queue"]:
             st["textures"][it["key"]] = object()
             st["hashes"][it["key"]] = it["hash"]
         st["queue"].clear()
         st["queued_keys"].clear()
         props.resolution = "256" if old != "256" else "64"
-        mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
         assert st["queue"], "changing Quality did not re-queue previews"
     finally:
         props.resolution = old

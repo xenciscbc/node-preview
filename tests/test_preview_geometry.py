@@ -18,12 +18,12 @@ def test_preview_meshes_have_uv(mod):
 def test_stale_preview_mesh_without_uv_is_rebuilt(mod):
     # A plane left over from an older add-on version (saved in a .blend) has
     # no UV layer; ensure_preview_scene must not keep reusing it.
-    me = bpy.data.meshes.new(mod.PREVIEW_PLANE + "_mesh")
+    me = bpy.data.meshes.new(mod.common.PREVIEW_PLANE + "_mesh")
     bm = bmesh.new()
     bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=1.0)
     bm.to_mesh(me)
     bm.free()
-    bpy.data.objects.new(mod.PREVIEW_PLANE, me)
+    bpy.data.objects.new(mod.common.PREVIEW_PLANE, me)
     _scn, plane, _sphere = mod.preview_scene.ensure_preview_scene(32)
     assert _uv_names(plane), "stale preview plane without UVs was reused"
 
@@ -36,7 +36,7 @@ def test_image_texture_thumbnail_is_not_flat(mod):
     tex.image = img
     try:
         with capture_renders(mod) as shots:
-            mod.render_shader(mat, tex.name, 64, bpy.context.scene.npv)
+            mod.renderers.render_shader(mat, tex.name, 64, bpy.context.scene.npv)
     finally:
         bpy.data.materials.remove(mat)
         bpy.data.images.remove(img)

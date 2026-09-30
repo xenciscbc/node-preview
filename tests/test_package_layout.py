@@ -26,8 +26,9 @@ def _submodules(mod):
             if fn.endswith(".py") and fn != "__init__.py"}
 
 
-def _defined(path):
-    """Names a module defines at top level (def / class / assignment)."""
+def _defined(path, imports=False):
+    """Names a module defines at top level (def / class / assignment), and
+    with ``imports`` also the names its imports bind (``bpy``, ...)."""
     out = set()
     for node in ast.parse(open(path, encoding="utf-8").read()).body:
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -36,6 +37,8 @@ def _defined(path):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
                 out |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+        elif imports and isinstance(node, (ast.Import, ast.ImportFrom)):
+            out |= {(a.asname or a.name).split(".")[0] for a in node.names}
     return out
 
 
@@ -81,7 +84,7 @@ def test_patches_reach_every_caller(mod):
                                                   owners[dotted], dotted))
         elif len(parts) == 2 and parts[0] in subs:
             sub, name = parts
-            if name not in _defined(subs[sub]):
+            if name not in _defined(subs[sub], imports=True):
                 bad.append("%s replaces mod.%s, not defined in %s.py" % (fn, dotted, sub))
             if (sub, name) in imports:
                 bad.append("%s replaces mod.%s, but it is imported by name "
@@ -94,8 +97,8 @@ def test_patch_scan_sees_the_known_patches(mod):
     # Guards the regexes above: if they stop matching, the check passes vacuously.
     names = {n for _fn, n in _patched_names()}
     assert {"preview_scene._render_scene", "preview_scene._png_to_texture",
-            "sources._kind_enabled", "_live_space_ptrs", "process_queue",
-            "bpy"} <= names, sorted(names)
+            "sources._kind_enabled", "timer._live_space_ptrs",
+            "queue.process_queue", "drawing.bpy"} <= names, sorted(names)
 
 
 def test_imported_names_are_the_modules_objects(mod):

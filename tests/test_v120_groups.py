@@ -70,12 +70,12 @@ def _render_node(mod, tree, path, node_name):
     ``node_name``; returns its mean colour."""
     props = bpy.context.scene.npv
     _clear_state(mod)
-    mod.rebuild_queue(tree, mod.KIND_SHADER, props, path=path)
+    mod.queue.rebuild_queue(tree, mod.KIND_SHADER, props, path=path)
     items = [it for it in mod._state["queue"] if it["node"] == node_name]
     assert items, "%s not queued (queue: %r)" % (node_name, [i["node"] for i in mod._state["queue"]])
     mod._state["queue"][:] = items
     with capture_renders(mod) as shots:
-        mod.process_queue(props)
+        mod.queue.process_queue(props)
     assert shots, "nothing rendered for %s" % node_name
     return mean_rgb(shots[0])
 
@@ -128,12 +128,12 @@ def test_switching_material_context_requeues(mod):
     props = bpy.context.scene.npv
     try:
         _clear_state(mod)
-        mod.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
         assert mod._state["queue"], "nothing queued inside the group"
         _mark_rendered(mod)
-        mod.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m1.node_tree, g])
         assert not mod._state["queue"], "same context re-queued"
-        mod.rebuild_queue(g, mod.KIND_SHADER, props, path=[m2.node_tree, g])
+        mod.queue.rebuild_queue(g, mod.KIND_SHADER, props, path=[m2.node_tree, g])
         assert any(it["node"] == "Inner Mix" for it in mod._state["queue"]), \
             "entering the group from another material did not re-queue"
     finally:
@@ -200,12 +200,12 @@ def test_geometry_node_inside_group(mod):
 
     try:
         _clear_state(mod)
-        mod.rebuild_queue(inner, mod.KIND_GEO, props, path=[root, inner])
+        mod.queue.rebuild_queue(inner, mod.KIND_GEO, props, path=[root, inner])
         items = [it for it in mod._state["queue"] if it["node"] == "Inner Grid"]
         assert items, "inner geometry node not queued: %r" % [i["node"] for i in mod._state["queue"]]
         mod._state["queue"][:] = items
         mod.preview_scene._render_scene = spy
-        mod.process_queue(props)
+        mod.queue.process_queue(props)
     finally:
         mod.preview_scene._render_scene = orig
         _clear_state(mod)
@@ -223,9 +223,9 @@ def test_prune_never_evicts_the_active_tree(mod):
     mb = bpy.data.materials.new("NPV_test_other")
     pa, pb = ma.node_tree.as_pointer(), mb.node_tree.as_pointer()
     st = mod._state
-    orig = mod._max_textures
+    orig = mod.queue._max_textures
     saved = st["active_tree_ptr"]
-    mod._max_textures = lambda: 16
+    mod.queue._max_textures = lambda: 16
     try:
         st["active_tree_ptr"] = pa
         for i in range(20):
@@ -233,14 +233,14 @@ def test_prune_never_evicts_the_active_tree(mod):
                 key = "%d:N%d|" % (p, i)
                 st["textures"][key] = object()
                 st["hashes"][key] = "h"
-                mod._touch(key)
+                mod.queue._touch(key)
         mod._prune_cache()
         active = [k for k in st["textures"] if k.startswith("%d:" % pa)]
         other = [k for k in st["textures"] if k.startswith("%d:" % pb)]
         assert len(active) == 20, "active editor's thumbnails evicted (%d left)" % len(active)
         assert not other, "other trees' thumbnails kept over the limit: %d" % len(other)
     finally:
-        mod._max_textures = orig
+        mod.queue._max_textures = orig
         st["active_tree_ptr"] = saved
         _clear_state(mod)
         bpy.data.materials.remove(ma)
@@ -252,21 +252,21 @@ def test_cache_limit_preference(mod):
     assert (prop.default, prop.hard_min, prop.hard_max) == (256, 16, 4096), \
         (prop.default, prop.hard_min, prop.hard_max)
     assert mod.NPVAddonPrefs.is_registered, "preferences class not registered"
-    assert mod._max_textures() == 256, "fallback limit"
+    assert mod.queue._max_textures() == 256, "fallback limit"
     mat = bpy.data.materials.new("NPV_test_lim")
     ptr = mat.node_tree.as_pointer()
     st = mod._state
-    orig = mod._max_textures
-    mod._max_textures = lambda: 16
+    orig = mod.queue._max_textures
+    mod.queue._max_textures = lambda: 16
     try:
         for i in range(40):
             key = "%d:N%d|" % (ptr, i)
             st["textures"][key] = object()
             st["hashes"][key] = "h"
-            mod._touch(key)
+            mod.queue._touch(key)
         mod._prune_cache()
         assert len(st["textures"]) == 16, len(st["textures"])
     finally:
-        mod._max_textures = orig
+        mod.queue._max_textures = orig
         _clear_state(mod)
         bpy.data.materials.remove(mat)

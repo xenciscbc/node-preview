@@ -26,19 +26,19 @@ def test_cache_is_pruned_right_after_renders_over_the_limit(mod):
     st = mod._state
     props = _props()
     mat = bpy.data.materials.new("NPV_tl_prune")
-    orig = mod._max_textures, mod.process_queue, mod.sources._resolve_active
-    mod._max_textures = lambda: 4
+    orig = mod.queue._max_textures, mod.queue.process_queue, mod.sources._resolve_active
+    mod.queue._max_textures = lambda: 4
     mod.sources._resolve_active = lambda: (None, None, None)
     tree = mat.node_tree
 
     def render_some(p):
         for i in range(3):
-            k = mod._skey(tree, "r%d_%d" % (len(st["textures"]), i), None)
+            k = mod.common._skey(tree, "r%d_%d" % (len(st["textures"]), i), None)
             st["textures"][k] = object()
-            mod._touch(k)
+            mod.queue._touch(k)
         return True
 
-    mod.process_queue = render_some
+    mod.queue.process_queue = render_some
     try:
         _clear(mod)
         st["prune_in"] = 20                 # not due on the 3 s cadence
@@ -47,7 +47,7 @@ def test_cache_is_pruned_right_after_renders_over_the_limit(mod):
             assert len(st["textures"]) <= 4, \
                 "cache over its limit between prunes: %d (#40)" % len(st["textures"])
     finally:
-        mod._max_textures, mod.process_queue, mod.sources._resolve_active = orig
+        mod.queue._max_textures, mod.queue.process_queue, mod.sources._resolve_active = orig
         _clear(mod)
         bpy.data.materials.remove(mat)
 
@@ -78,7 +78,7 @@ def test_mesh_edit_does_not_rerender_field_swatches(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert {it["node"] for it in mod._state["queue"]} >= {"Xform", "Noise"}
         for it in mod._state["queue"]:
             mod._state["textures"][it["key"]] = object()
@@ -86,8 +86,8 @@ def test_mesh_edit_does_not_rerender_field_swatches(mod):
         mod._state["queue"].clear()
         mod._state["queued_keys"].clear()
         me.vertices[0].co = (0.0, 0.0, 2.0)
-        mod._mark_data_changed(mod._idref(me))
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue._mark_data_changed(mod._idref(me))
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert [it["node"] for it in mod._state["queue"]] == ["Xform"], \
             [it["node"] for it in mod._state["queue"]]
     finally:
@@ -104,20 +104,20 @@ def test_edit_mode_reuses_the_fingerprint(mod):
     try:
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()
-        first = mod._data_sig(me)
+        first = mod.queue._data_sig(me)
         calls = []
-        orig = mod._compute_data_sig
-        mod._compute_data_sig = lambda d, o=None: calls.append(1) or orig(d, o)
+        orig = mod.queue._compute_data_sig
+        mod.queue._compute_data_sig = lambda d, o=None: calls.append(1) or orig(d, o)
         try:
-            mod._mark_data_changed(mod._idref(me))
+            mod.queue._mark_data_changed(mod._idref(me))
             # A mesh in Edit Mode (is_editmode) returns the cached value.
             proxy = type("M", (), {"name": me.name, "library": None, "is_editmode": True})()
-            assert mod._data_sig(proxy) == first and not calls, \
+            assert mod.queue._data_sig(proxy) == first and not calls, \
                 "fingerprinted a mesh in Edit Mode"
-            assert mod._data_sig(me) is not None and calls, \
+            assert mod.queue._data_sig(me) is not None and calls, \
                 "change not picked up after leaving Edit Mode"
         finally:
-            mod._compute_data_sig = orig
+            mod.queue._compute_data_sig = orig
     finally:
         mod._state["data_sigs"].clear()
         mod._state["data_gen"].clear()

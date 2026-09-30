@@ -27,7 +27,7 @@ def _render_comp(mod, scn):
     orig = mod.preview_scene._png_to_texture
     mod.preview_scene._png_to_texture = lambda p: paths.append(p) or True
     try:
-        ok = mod.render_compositor(scn, "RGB", 16, _props())
+        ok = mod.renderers.render_compositor(scn, "RGB", 16, _props())
     finally:
         mod.preview_scene._png_to_texture = orig
     return ok, paths
@@ -69,7 +69,7 @@ def test_compositor_preview_with_stereoscopy(mod):
 
 def test_cube_shows_three_faces(mod):
     mod.preview_scene.ensure_preview_scene(32)
-    cube = bpy.data.objects[mod.PREVIEW_CUBE]
+    cube = bpy.data.objects[mod.common.PREVIEW_CUBE]
     m = cube.rotation_euler.to_matrix()
     facing = [round((m @ Vector(n)).z, 3) for n in
               ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))]
@@ -84,7 +84,7 @@ def test_cube_shows_three_faces(mod):
     try:
         out = next(n for n in mat.node_tree.nodes if n.bl_idname == "ShaderNodeOutputMaterial")
         with capture_renders(mod) as shots:
-            assert mod.render_shader(mat, out.name, 32, props)
+            assert mod.renderers.render_shader(mat, out.name, 32, props)
         assert opaque_rgb(shots[0]), "cube render is empty"
     finally:
         props.shader_shape = "SPHERE"
@@ -98,12 +98,12 @@ def test_zone_output_edits_do_not_rehash_the_input(mod):
         zo = ng.nodes.new("GeometryNodeRepeatOutput")
         zi.pair_with_output(zo)
         assert getattr(zi, "paired_output", None) == zo
-        before = mod.upstream_hash(zi, {})
+        before = mod.hashing.upstream_hash(zi, {})
         zo.location.x += 250
         zo.select = not zo.select
         zo.label = "moved"
         zo.width += 40
-        assert mod.upstream_hash(zi, {}) == before, \
+        assert mod.hashing.upstream_hash(zi, {}) == before, \
             "moving / selecting the zone output re-hashed the zone input"
     finally:
         bpy.data.node_groups.remove(ng)

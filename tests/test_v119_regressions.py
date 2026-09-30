@@ -70,7 +70,7 @@ def test_geometry_preview_shares_the_mesh(mod):
     before = sorted(m.name for m in bpy.data.meshes)
     mod.preview_scene._render_scene = spy
     try:
-        mod.render_geo(ob, "T", 32, bpy.context.scene.npv, tree=ng)
+        mod.renderers.render_geo(ob, "T", 32, bpy.context.scene.npv, tree=ng)
     except RuntimeError:
         pass
     finally:
@@ -104,14 +104,14 @@ def test_group_internal_edit_changes_hash(mod):
     nt.links.new(g.outputs[0], inv.inputs["Color"])
     try:
         memo = {}
-        before = (mod.upstream_hash(g, memo), mod.upstream_hash(inv, memo))
-        sig = mod.tree_signature(nt)
+        before = (mod.hashing.upstream_hash(g, memo), mod.hashing.upstream_hash(inv, memo))
+        sig = mod.hashing.tree_signature(nt)
         inner.inputs["Scale"].default_value += 2.0
         memo = {}
-        after = (mod.upstream_hash(g, memo), mod.upstream_hash(inv, memo))
+        after = (mod.hashing.upstream_hash(g, memo), mod.hashing.upstream_hash(inv, memo))
         assert after[0] != before[0], "group node hash ignores the group's contents"
         assert after[1] != before[1], "downstream hash ignores the group's contents"
-        assert mod.tree_signature(nt) != sig, "tree_signature ignores group contents"
+        assert mod.hashing.tree_signature(nt) != sig, "tree_signature ignores group contents"
     finally:
         bpy.data.materials.remove(mat)
         bpy.data.node_groups.remove(grp)
@@ -127,9 +127,9 @@ def test_recursive_group_does_not_loop(mod):
     gi = outer.nodes.new("ShaderNodeGroup")
     gi.node_tree = inner
     try:
-        assert mod.tree_signature(outer)
+        assert mod.hashing.tree_signature(outer)
         memo = {}
-        assert mod.upstream_hash(gi, memo)
+        assert mod.hashing.upstream_hash(gi, memo)
     finally:
         bpy.data.node_groups.remove(outer)
         bpy.data.node_groups.remove(inner)
@@ -156,9 +156,9 @@ def test_image_paint_update_changes_hash(mod):
     img = bpy.data.images.new("NPV_test_paint", 16, 16)
     mat, tex = _image_material(img)
     try:
-        h0 = mod.upstream_hash(tex, {})
+        h0 = mod.hashing.upstream_hash(tex, {})
         mod._on_depsgraph(bpy.context.scene, _DG(img))  # what a paint stroke sends
-        assert mod.upstream_hash(tex, {}) != h0, "image update does not change the hash"
+        assert mod.hashing.upstream_hash(tex, {}) != h0, "image update does not change the hash"
     finally:
         bpy.data.materials.remove(mat)
         bpy.data.images.remove(img)
@@ -175,11 +175,11 @@ def test_image_file_change_changes_hash(mod):
     img = bpy.data.images.load(path)
     mat, tex = _image_material(img)
     try:
-        h0 = mod.upstream_hash(tex, {})
+        h0 = mod.hashing.upstream_hash(tex, {})
         st = os.stat(path)
         os.utime(path, (st.st_atime, st.st_mtime + 10))  # "edited externally"
         img.reload()
-        assert mod.upstream_hash(tex, {}) != h0, "reloaded image file does not change the hash"
+        assert mod.hashing.upstream_hash(tex, {}) != h0, "reloaded image file does not change the hash"
     finally:
         bpy.data.materials.remove(mat)
         bpy.data.images.remove(img)
@@ -195,12 +195,12 @@ def test_rebuild_drops_textures_of_removed_nodes(mod):
     n2.name = "Gone"
     props = bpy.context.scene.npv
     try:
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         _mark_rendered(mod)
         gone = [k for k in mod._state["textures"] if ":Gone|" in k]
         assert gone, "setup: no texture for 'Gone'"
         nt.nodes.remove(n2)
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         left = [k for k in mod._state["textures"] if ":Gone|" in k]
         assert not left, "texture of a deleted node kept: %r" % left
         assert any(":Keep|" in k for k in mod._state["textures"]), "live texture dropped"
@@ -214,7 +214,7 @@ def test_prune_drops_textures_of_deleted_trees(mod):
     mat.node_tree.nodes.new("ShaderNodeTexNoise")
     props = bpy.context.scene.npv
     try:
-        mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, props)
         _mark_rendered(mod)
         assert mod._state["textures"], "setup: nothing cached"
         bpy.data.materials.remove(mat)
@@ -238,7 +238,7 @@ def test_prune_caps_cache_size_keeping_recent(mod):
             key = "%d:N%d|" % (ptr, i)
             st["textures"][key] = object()
             st["hashes"][key] = "h"
-            mod._touch(key)
+            mod.queue._touch(key)
         mod._prune_cache()
         assert len(st["textures"]) == mod.MAX_TEXTURES, len(st["textures"])
         assert "%d:N%d|" % (ptr, n - 1) in st["textures"], "most recent texture evicted"

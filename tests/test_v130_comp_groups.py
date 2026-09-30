@@ -66,14 +66,14 @@ def test_comp_node_inside_group_previews_with_outer_input(mod):
     tree, grp = _setup(scene)
     try:
         _clear_state(mod)
-        mod.rebuild_queue(grp, mod.KIND_COMP, props, path=[tree, grp])
+        mod.queue.rebuild_queue(grp, mod.KIND_COMP, props, path=[tree, grp])
         items = [it for it in mod._state["queue"] if it["node"] == "Inner Mix"]
         assert items, "Inner Mix not queued: %r" % [i["node"] for i in mod._state["queue"]]
         mod._state["queue"][:] = items
         tstate, gstate = _tree_state(tree), _tree_state(grp)
         snap = datablock_names()
         with capture_renders(mod) as shots:
-            mod.process_queue(props)
+            mod.queue.process_queue(props)
         assert shots, "nothing rendered for Inner Mix"
         r, g, b = mean_rgb(shots[0])
         assert r > g + 0.3 and r > b + 0.3, "inner node not red from outer input: %r" % ((r, g, b),)
@@ -91,14 +91,14 @@ def test_comp_groups_toggle_off_skips_and_drops(mod):
     tree, grp = _setup(scene)
     try:
         _clear_state(mod)
-        key = mod._skey(grp, "Inner Mix", None)
+        key = mod.common._skey(grp, "Inner Mix", None)
         mod._state["textures"][key] = object()
         props.comp_groups = False
-        mod.rebuild_queue(grp, mod.KIND_COMP, props, path=[tree, grp])
+        mod.queue.rebuild_queue(grp, mod.KIND_COMP, props, path=[tree, grp])
         assert not mod._state["queue"], "queued inside a group with the toggle off"
         assert key not in mod._state["textures"], "stale group thumbnail kept"
         # The top level is unaffected by the toggle.
-        mod.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
+        mod.queue.rebuild_queue(tree, mod.KIND_COMP, props, path=[tree])
         assert any(it["node"] == "G" for it in mod._state["queue"]), \
             "top-level group node not queued"
     finally:

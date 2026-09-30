@@ -42,11 +42,11 @@ def test_curve_edit_changes_the_hash(mod):
     mat = _bare_material("NPV_trv_curve")
     try:
         node = mat.node_tree.nodes.new("ShaderNodeRGBCurve")
-        h1 = mod.upstream_hash(node, {})
-        assert mod.upstream_hash(node, {}) == h1, "curve hash is unstable"
+        h1 = mod.hashing.upstream_hash(node, {})
+        assert mod.hashing.upstream_hash(node, {}) == h1, "curve hash is unstable"
         node.mapping.curves[3].points[0].location = (0.0, 0.4)
         node.mapping.update()
-        assert mod.upstream_hash(node, {}) != h1, "curve edit not detected"
+        assert mod.hashing.upstream_hash(node, {}) != h1, "curve edit not detected"
     finally:
         bpy.data.materials.remove(mat)
 
@@ -57,15 +57,15 @@ def test_image_user_changes_the_hash_but_not_its_frame(mod):
     try:
         node = mat.node_tree.nodes.new("ShaderNodeTexImage")
         node.image = img
-        h1 = mod.upstream_hash(node, {})
+        h1 = mod.hashing.upstream_hash(node, {})
         try:
             node.image_user.frame_current = 7
         except (AttributeError, TypeError):
             pass
-        assert mod.upstream_hash(node, {}) == h1, \
+        assert mod.hashing.upstream_hash(node, {}) == h1, \
             "the sequence frame changed the hash without Update on Frame Change"
         node.image_user.frame_offset = 5
-        assert mod.upstream_hash(node, {}) != h1, "Image User edit not detected"
+        assert mod.hashing.upstream_hash(node, {}) != h1, "Image User edit not detected"
     finally:
         bpy.data.materials.remove(mat)
         bpy.data.images.remove(img)
@@ -88,8 +88,8 @@ def test_hashes_are_stable_for_common_nodes(mod):
             if hasattr(n, "image"):
                 n.image = img
         for n in nt.nodes:
-            a = mod.upstream_hash(n, {})
-            b = mod.upstream_hash(n, {})
+            a = mod.hashing.upstream_hash(n, {})
+            b = mod.hashing.upstream_hash(n, {})
             assert a == b, "hash of %s is unstable" % n.bl_idname
     finally:
         bpy.data.materials.remove(mat)
@@ -167,18 +167,18 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
     try:
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert any(it["node"] == "Xform" for it in mod._state["queue"])
         _mark_rendered(mod)
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert not mod._state["queue"], "GN previews re-queued with no change"
 
         m.show_expanded = not m.show_expanded
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert not mod._state["queue"], "a modifier panel toggle re-rendered"
 
         set_modifier_input(m, ident, "Amount", 2.0)
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "modifier input change not detected"
         _mark_rendered(mod)
 
@@ -186,7 +186,7 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         # preview shares the mesh) must not re-render: that looped forever.
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
         assert mod._state["dirty"]
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert not mod._state["queue"], "a data update with no change re-rendered"
 
         # A real edit of the object's data does.
@@ -194,12 +194,12 @@ def test_geo_modifier_inputs_and_object_data_requeue(mod):
         ob.data.vertices[-1].co = (0.5, 0.25, 0.0)
         ob.data.update()
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "object data edit not detected"
         _mark_rendered(mod)
         ob.data.vertices[-1].co = (0.5, 0.75, 0.0)
         mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"], "moving a vertex not detected"
     finally:
         props.preview_geometry = False
@@ -215,7 +215,7 @@ def test_tree_signature_memo_is_scoped_to_a_rebuild(mod):
     try:
         mat.node_tree.nodes.new("ShaderNodeTexNoise")
         _clear(mod)
-        mod.rebuild_queue(mat.node_tree, mod.KIND_SHADER, _props())
+        mod.queue.rebuild_queue(mat.node_tree, mod.KIND_SHADER, _props())
         assert mod._state["tree_sig_memo"] is None, "memo left active after rebuild"
     finally:
         _clear(mod)
@@ -232,7 +232,7 @@ def test_preview_uses_the_output_the_engine_renders(mod):
     nt = mat.node_tree
     out_other = nt.nodes.new("ShaderNodeOutputMaterial")
     out_this = nt.nodes.new("ShaderNodeOutputMaterial")
-    engine = mod._engine_id(_props())
+    engine = mod.common._engine_id(_props())
     out_other.target = "EEVEE" if engine == "CYCLES" else "CYCLES"
     out_this.target = "CYCLES" if engine == "CYCLES" else "EEVEE"
     green = nt.nodes.new("ShaderNodeEmission")
@@ -245,7 +245,7 @@ def test_preview_uses_the_output_the_engine_renders(mod):
     links = len(nt.links)
     try:
         with capture_renders(mod) as shots:
-            assert mod.render_shader(mat, "Src", 32, _props())
+            assert mod.renderers.render_shader(mat, "Src", 32, _props())
         r, g, b = mean_rgb(shots[0])
         assert r > g + 0.3, "preview shows the material, not the node: %r" % ((r, g, b),)
         assert len(nt.links) == links and len(nt.nodes) == 4, "user material modified"
@@ -293,7 +293,7 @@ def test_geometry_off_origin_is_framed(mod):
 
     mod.preview_scene._png_to_texture = spy
     try:
-        assert mod.render_geo(ob, "Cube", res, _props())
+        assert mod.renderers.render_geo(ob, "Cube", res, _props())
     finally:
         mod.preview_scene._png_to_texture = orig
         bpy.data.objects.remove(ob)
@@ -332,7 +332,7 @@ def test_compositor_preview_ignores_output_extras(mod):
     mod.preview_scene._render_scene = spy
     try:
         try:
-            mod.render_compositor(scene, "RGB", 32, scene.npv)
+            mod.renderers.render_compositor(scene, "RGB", 32, scene.npv)
         except RuntimeError:
             pass
         assert seen and not any(seen[0].values()), "preview inherited %r" % seen
@@ -356,10 +356,10 @@ def test_rebuild_drops_pending_renders_no_longer_shown(mod):
         for idn in ("ShaderNodeTexNoise", "ShaderNodeTexWave"):
             nt.nodes.new(idn).select = False
         _clear(mod)
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert len(mod._state["queue"]) == 2
         props.preview_scope = "SELECTED"
-        mod.rebuild_queue(nt, mod.KIND_SHADER, props)
+        mod.queue.rebuild_queue(nt, mod.KIND_SHADER, props)
         assert not mod._state["queue"], "renders of filtered-out nodes kept queued"
         assert not mod._state["queued_keys"]
     finally:
@@ -377,7 +377,7 @@ def test_timer_drops_pending_renders_of_disabled_kinds(mod):
         st["queue"][:] = [{"key": "1:a|", "kind": mod.KIND_COMP, "chain": []},
                           {"key": "1:b|", "kind": mod.KIND_SHADER, "chain": []}]
         st["queued_keys"] = {"1:a|", "1:b|"}
-        mod._drop_disallowed(props)
+        mod.queue._drop_disallowed(props)
         assert [it["key"] for it in st["queue"]] == ["1:b|"], st["queue"]
         assert st["queued_keys"] == {"1:b|"}
 
@@ -386,7 +386,7 @@ def test_timer_drops_pending_renders_of_disabled_kinds(mod):
         st["queue"][:] = [{"key": "1:c|", "kind": mod.KIND_COMP, "chain": ["G"]},
                           {"key": "1:d|", "kind": mod.KIND_COMP, "chain": []}]
         st["queued_keys"] = {"1:c|", "1:d|"}
-        mod._drop_disallowed(props)
+        mod.queue._drop_disallowed(props)
         assert [it["key"] for it in st["queue"]] == ["1:d|"], st["queue"]
     finally:
         props.preview_compositor = False
@@ -441,10 +441,10 @@ def test_linked_data_with_a_local_name_resolves_separately(mod):
     linked = next(m for m in bpy.data.materials if m.name == name and m.library)
     try:
         assert mod._idref(mat) == name
-        assert mod._idget(bpy.data.materials, name) == mat, "plain name hit linked data"
+        assert mod.sources._idget(bpy.data.materials, name) == mat, "plain name hit linked data"
         ref = mod._idref(linked)
         assert ref != name
-        assert mod._idget(bpy.data.materials, ref) == linked
+        assert mod.sources._idget(bpy.data.materials, ref) == linked
         mod._state["src_hint"] = [("MAT", ref)]
         assert mod.resolve_source(linked.node_tree, mod.KIND_SHADER) == ("MAT", ref)
     finally:
@@ -472,15 +472,15 @@ def test_geo_preview_render_does_not_requeue_itself(mod):
         _clear(mod)
         mod._state["src_hint"] = [("OBJ", ob.name)]
         mod.preview_scene.ensure_preview_scene(32)
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert mod._state["queue"]
         with capture_renders(mod):
             while mod._state["queue"]:
-                mod.process_queue(props)
+                mod.queue.process_queue(props)
         # What Blender reports after the render, from both scenes.
         for _ in range(2):
             mod._on_depsgraph(bpy.context.scene, _DG(_Upd("MESH", ob.data.name)))
-        mod.rebuild_queue(ng, mod.KIND_GEO, props)
+        mod.queue.rebuild_queue(ng, mod.KIND_GEO, props)
         assert not mod._state["queue"], "a preview render re-queued its own previews"
     finally:
         props.preview_geometry = False

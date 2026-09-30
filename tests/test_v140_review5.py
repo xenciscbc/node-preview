@@ -87,25 +87,25 @@ def test_forgotten_editor_drops_its_queue_and_the_fallback(mod):
         for k in keys:
             mod._state["queue"].append(_item(k))
             mod._state["queued_keys"].add(k)
-        mod._forget_editor(Space(1))
+        mod.drawing._forget_editor(Space(1))
         left = [it["key"] for it in mod._state["queue"]]
         assert left == ["22:N#b"], left
         assert mod._state["queued_keys"] == {"22:N#b"}
         assert mod._state["active_tree_ptr"] == 22, "another editor is still open"
         # The last one: its renders go, and the last drawn tree is no
         # fallback target any more (it kept rendering for a hidden editor).
-        mod._forget_editor(Space(2))
+        mod.drawing._forget_editor(Space(2))
         assert not mod._state["queue"] and not mod._state["queued_keys"]
         assert mod._state["active_tree_ptr"] is None
         assert mod._state["active_path"] is None
-        assert all(t[0] is None for t in mod._editor_targets())
-        assert not mod._in_view("22:N#b")
+        assert all(t[0] is None for t in mod.timer._editor_targets())
+        assert not mod.timer._in_view("22:N#b")
     finally:
         _clear(mod)
 
 
 def test_pruned_editor_drops_its_queue(mod):
-    orig = mod._live_space_ptrs
+    orig = mod.timer._live_space_ptrs
     try:
         _clear(mod)
         mod._state["editors"][7] = {"tree": 77, "kind": mod.KIND_SHADER, "path": [77],
@@ -116,11 +116,11 @@ def test_pruned_editor_drops_its_queue(mod):
         mod._state["active_path"] = [77]
         mod._state["queue"].append(_item("77:N#x"))
         mod._state["queued_keys"].add("77:N#x")
-        mod._live_space_ptrs = lambda: set()
-        mod._prune_editors()
+        mod.timer._live_space_ptrs = lambda: set()
+        mod.timer._prune_editors()
         assert not mod._state["editors"]
         assert not mod._state["queue"] and not mod._state["queued_keys"]
         assert mod._state["active_tree_ptr"] is None
     finally:
-        mod._live_space_ptrs = orig
+        mod.timer._live_space_ptrs = orig
         _clear(mod)

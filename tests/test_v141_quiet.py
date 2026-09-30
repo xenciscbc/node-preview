@@ -53,7 +53,7 @@ def test_preview_render_prints_no_saved_line(mod):
     try:
         mod.preview_scene.ensure_preview_scene(32)
         with capture_renders(mod) as shots:
-            ok, text = _capture_fds(lambda: mod.render_shader(mat, "Checker", 32, props))
+            ok, text = _capture_fds(lambda: mod.renderers.render_shader(mat, "Checker", 32, props))
         assert ok, "render failed"
         assert "Saved:" not in text, "Blender's 'Saved:' line is back: %r" % text[-300:]
         assert shots and color_std(shots[0]) > 0.05, "render is flat / empty"
@@ -79,7 +79,7 @@ def test_value_swatch_exr_still_written_quietly(mod):
     orig = mod.preview_scene._png_to_texture
     mod.preview_scene._png_to_texture = lambda p: got.append(mod.preview_scene._load_render(p)) or True
     try:
-        ok, text = _capture_fds(lambda: mod.render_shader(mat, "Src", 16, bpy.context.scene.npv))
+        ok, text = _capture_fds(lambda: mod.renderers.render_shader(mat, "Src", 16, bpy.context.scene.npv))
     finally:
         mod.preview_scene._png_to_texture = orig
         bpy.data.materials.remove(mat)

@@ -11,8 +11,9 @@ import numpy as np
 from gpu.types import GPUTexture, Buffer
 
 from .common import (
-    ENV_IMAGE_PREFIX, PREVIEW_CAM, PREVIEW_CUBE, PREVIEW_PLANE, PREVIEW_SCENE,
-    PREVIEW_SPHERE, PREVIEW_SUN, _state,
+    ENV_IMAGE_PREFIX, GEO_CLAY_MAT, PREVIEW_CAM, PREVIEW_CUBE, PREVIEW_MAT_TMP,
+    PREVIEW_PLANE, PREVIEW_PREV_WORLD, PREVIEW_SCENE, PREVIEW_SPHERE, PREVIEW_SUN,
+    _state,
 )
 from .eligibility import _enum_num
 
@@ -301,3 +302,42 @@ def _render_scene(scn):
     if not os.path.isfile(path):
         raise RuntimeError("render finished without writing %s" % path)
     return path
+
+
+def _cleanup_datablocks():
+    for name in (PREVIEW_MAT_TMP, GEO_CLAY_MAT):
+        m = bpy.data.materials.get(name)
+        if m is not None:
+            try:
+                bpy.data.materials.remove(m)
+            except Exception:
+                pass
+    scn = bpy.data.scenes.get(PREVIEW_SCENE)
+    if scn is not None:
+        try:
+            bpy.data.scenes.remove(scn)
+        except Exception:
+            pass
+    for name in (PREVIEW_PLANE, PREVIEW_SPHERE, PREVIEW_CUBE, PREVIEW_CAM,
+                 PREVIEW_SUN, "NPV_vol_light"):
+        o = bpy.data.objects.get(name)
+        if o is not None:
+            data = o.data
+            try:
+                bpy.data.objects.remove(o)
+                if data is not None and data.users == 0:
+                    bpy.data.batch_remove([data])
+            except Exception:
+                pass
+    for name in (PREVIEW_PREV_WORLD, "NPV_world"):
+        w = bpy.data.worlds.get(name)
+        if w is not None:
+            try:
+                bpy.data.worlds.remove(w)
+            except Exception:
+                pass
+    for img in [i for i in bpy.data.images if i.name.startswith(ENV_IMAGE_PREFIX)]:
+        try:
+            bpy.data.images.remove(img)
+        except Exception:
+            pass
