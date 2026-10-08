@@ -1,11 +1,26 @@
-# Open issues (found in code review, to be verified and fixed locally)
+# Open issues (found in code review)
 
-Found by reading the code at commit `0f04085` (after the module split). The
-cloud session that wrote this had **no Blender**, so nothing here has been run
-yet. Each issue was traced end to end in the code, but the repro tests below
-are untested drafts.
+Found by reading the code at commit `0f04085` (after the module split), then
+**reproduced and fixed headless** in a cloud session. That session ran the
+suite with the `bpy` 5.2.2 module from PyPI and Mesa software rendering, not
+with a Blender GUI.
 
-## How to work an issue
+- Each issue has a regression test in `tests/test_v142_issues.py`. NPV-12's
+  is in `tests/test_build_version.py`.
+- Every one of these tests fails on `0f04085` and passes on `9a6c8dc`.
+- The full suite passes: 171 tests.
+
+**What's left for a local session with Blender:** the **GUI steps** of each
+issue. They check the thumbnails as actually drawn in the node editor, which
+headless can't. Follow the rules at the top of `tests/gui_checklist.md`. For
+each issue, record the result on its Status line:
+- *GUI verified*, or
+- what you saw instead.
+
+If a GUI check fails, reopen the issue, add a headless test that catches the
+failure if one is possible, and fix it.
+
+## How the issues were worked (and how to work a new one)
 
 1. **Confirm the bug first.** Paste the issue's repro test into a test file
    (e.g. `tests/test_v142_issues.py`, which `run_tests.py` picks up) and run
@@ -24,7 +39,8 @@ are untested drafts.
 4. **Update the issue's Status line** with the fix commit, or *Not reproduced*
    / *Won't fix* plus the reason.
 
-Shared helpers for the repro tests (put them at the top of the test file):
+Shared helpers for the repro tests below. The tests as committed, with more
+cases, are in `tests/test_v142_issues.py`:
 
 ```python
 import types
@@ -57,7 +73,7 @@ def _queued_nodes(mod):
 
 ## Summary
 
-| ID | Severity | Area | Symptom |
+| ID | Severity | Area | Symptom (all fixed in `9a6c8dc`; GUI checks pending) |
 |---|---|---|---|
 | NPV-01 | Medium | Shader | Shape / World Light / Key Light / HDRI changes don't re-render a node whose *previewed* output is a shader but whose *first* output is not |
 | NPV-02 | Low | World | Key Light changes don't re-render world volume previews |
@@ -82,7 +98,7 @@ memory addresses, transforms of objects that aren't previewed.
 
 ## NPV-01 — The lighting signature is chosen by the wrong socket
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv01_light_sig_follows_previewed_socket`, `test_npv01_show_all_outputs_relights_only_the_shader_output` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `queue.py` `_rebuild_queue` (the `renders_as_shader(node)` test
   before `extra = esig + "|" + lsig`) and `eligibility.py`
   `renders_as_shader`, compared with `renderers.py` `render_shader`
@@ -151,7 +167,7 @@ def test_npv01_light_sig_follows_previewed_socket(mod):
 
 ## NPV-02 — Key Light doesn't re-render world volume previews
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv02_world_volume_follows_key_light` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `queue.py` `_rebuild_queue` adds `lsig` only for `KIND_SHADER`.
   `renderers.py` `render_world` passes `props.sun_strength` to
   `ensure_preview_scene`, and in the volume branch that sun lights the sphere
@@ -196,7 +212,7 @@ def test_npv02_world_volume_follows_key_light(mod):
 
 ## NPV-03 — Texture paint while Auto Update / Show Previews is off is lost
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv03_image_updates_counted_while_auto_update_off` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `timer.py` `_on_depsgraph`. The `img_gen` counter (part of
   `hashing.py` `_image_sig`) is bumped only after the early `return` for
   `not props.enabled or not props.auto_update`.
@@ -243,7 +259,7 @@ def test_npv03_image_updates_counted_while_auto_update_off(mod):
 
 ## NPV-04 — Switching an editor to another tree keeps rendering the old one
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv04_switching_tree_drops_old_pending_renders` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `drawing.py` `_record_editor` overwrites the editor's entry when
   it now shows another tree, and never calls `_editors_gone` for the old one.
   `queue.py` `_rebuild_queue` only cleans up keys with the *current* tree's
@@ -308,7 +324,7 @@ def test_npv04_switching_tree_drops_old_pending_renders(mod):
 
 ## NPV-05 — Undo before the queue finishes leaves items with the newer hash
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv05_undo_to_shown_hash_dequeues` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `queue.py` `_enqueue`.
   - The early return (`hashes[key] == h and key in textures`) runs before the
     `queued_keys` branch.
@@ -358,7 +374,7 @@ def test_npv05_undo_to_shown_hash_dequeues(mod):
 
 ## NPV-06 — Muting a link doesn't re-render
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv06_link_mute_changes_hash` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `hashing.py` `upstream_hash` hashes a linked input as
   `(from_socket, upstream hash)` and `tree_signature` hashes each link's ends.
   Neither includes `NodeLink.is_muted`. A muted link still shows in
@@ -394,7 +410,7 @@ def test_npv06_link_mute_changes_hash(mod):
 
 ## NPV-07 — Data behind an ID socket isn't hashed (Image / Object / Collection)
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `hashing.py` `_socket_default`.
   - For an ID-valued socket, `float(v)` fails, so the value becomes `str(v)`,
     i.e. `<bpy_struct, Image("x") at 0x…>`: a name plus a memory address.
@@ -446,7 +462,7 @@ def test_npv07_gn_image_socket_follows_paint(mod):
 
 ## NPV-08 — Geometry previews depend on transforms the hash ignores
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv08_geo_preview_ignores_rotation_mode`, `test_npv08_geo_preview_ignores_scale_parent_constraints`, `test_npv08_tree_reading_self_transform_keeps_it` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `renderers.py` `render_geo` sets `obj2.location` and
   `obj2.rotation_euler` to zero. The copy keeps:
   - `scale`
@@ -538,7 +554,7 @@ def test_npv08_geo_preview_ignores_rotation_mode(mod):
 
 ## NPV-09 — Group interface settings aren't hashed
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv09_interface_settings_in_signature` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `hashing.py` `tree_signature` covers nodes, unlinked defaults,
   output defaults and links, but not `tree.interface`. Interface settings
   change the result without touching any node:
@@ -579,7 +595,7 @@ def test_npv09_interface_settings_in_signature(mod):
 
 ## NPV-10 — GN previews use the modifiers' render visibility
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv10_geo_preview_uses_viewport_visibility` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `renderers.py` `render_geo` renders through
   `preview_scene._render_scene` (`render.render`). Modifiers are evaluated
   with `show_render`, and Subdivision uses its render levels. Neither the
@@ -630,7 +646,7 @@ def test_npv10_geo_preview_uses_viewport_visibility(mod):
 
 ## NPV-11 — Compositor tree shared by two scenes
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv11_shared_comp_tree_prefers_the_window_scene` fails on `0f04085` and passes now; **GUI check pending** (local session).
 - **Where:** `sources.py` `resolve_source` (KIND_COMP) returns the **first**
   scene in `bpy.data.scenes` whose `compositing_node_group` is the tree. The
   window's scene is never preferred: `drawing.py` `_editor_hint` records no
@@ -690,7 +706,7 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
 
 ## NPV-12 — Rebuilding a tagged release ignores uncommitted changes
 
-- **Status:** Open
+- **Status:** Fixed in `9a6c8dc`. Headless `test_build_version::test_rebuilding_a_tag_needs_a_clean_tree` fails on `0f04085` and passes now; no GUI check needed.
 - **Where:** `build_extension.py` `check_version` accepts an already-tagged
   version when the tag points at HEAD ("rebuilding that release"), but never
   checks the working tree. The zip is built from the files on disk.
@@ -711,12 +727,28 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
 
 ## Not bugs, but worth fixing alongside
 
-- `README.md` "Releasing", step 3: "Once the tag exists, the next build
-  refuses the same version." This is only true on another commit. On the
-  tagged commit the build succeeds (gate rule 1).
+- *(Fixed in `9a6c8dc`.)* `README.md` "Releasing", step 3: "Once the tag
+  exists, the next build refuses the same version." This was only true on
+  another commit.
 - `i18n.py`: the keys `help_tip` and `only_marked` are defined in both
   languages but never used.
 - `tests/blender_runner.py`, `run_tests.py`, `tests/npv_testutil.py` and
   `tests/test_package_layout.py` still accept a single-file add-on, which no
   longer exists since the legacy file was dropped. This is dead code, not a
   bug.
+
+## Known limits of the fixes
+
+- **NPV-07:** an object read through an Object / Collection socket is hashed
+  by its own data and its transform. Its *own modifiers* are not hashed: the
+  node reads the evaluated object. Changing a modifier on that other object
+  re-renders only with Refresh.
+- **NPV-07 / NPV-08:**
+  - `_state["xform_watch"]` (the objects whose moves re-hash) only grows
+    until the cache is reset, e.g. on file load.
+  - An object that a tree no longer reads still triggers a re-hash when
+    moved. Nothing re-renders, because the hash is unchanged.
+- **NPV-11:** a compositor node reading a *third* scene (neither the
+  previewed one nor its copy) still renders that scene at thumbnail size. The
+  comment in `render_compositor` says so.
+
