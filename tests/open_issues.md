@@ -10,12 +10,14 @@ with a Blender GUI.
 - Every one of these tests fails on `0f04085` and passes on `9a6c8dc`.
 - The full suite passes: 171 tests.
 
-**What's left for a local session with Blender:** the **GUI steps** of each
-issue. They check the thumbnails as actually drawn in the node editor, which
-headless can't. Follow the rules at the top of `tests/gui_checklist.md`. For
-each issue, record the result on its Status line:
-- *GUI verified*, or
-- what you saw instead.
+**GUI check (local session, Blender 5.2.2 via MCP, 2026-10-08):** the branch
+code was swapped into the live session in memory and each issue's GUI steps
+were run; results are on each Status line. The full suite also passes in
+real Blender 5.2.2 (172 tests with the new NPV-05 one).
+- NPV-01 .. NPV-04 and NPV-06 .. NPV-11: GUI verified (NPV-09 and NPV-12:
+  headless only, as agreed).
+- NPV-05: its fix broke Refresh (only the first batch rendered when a plain
+  rebuild ran meanwhile). Fixed and re-verified; see its Status.
 
 If a GUI check fails, reopen the issue, add a headless test that catches the
 failure if one is possible, and fix it.
@@ -73,7 +75,7 @@ def _queued_nodes(mod):
 
 ## Summary
 
-| ID | Severity | Area | Symptom (all fixed in `9a6c8dc`; GUI checks pending) |
+| ID | Severity | Area | Symptom (all fixed in `9a6c8dc`, NPV-05 again after its GUI check; GUI verified) |
 |---|---|---|---|
 | NPV-01 | Medium | Shader | Shape / World Light / Key Light / HDRI changes don't re-render a node whose *previewed* output is a shader but whose *first* output is not |
 | NPV-02 | Low | World | Key Light changes don't re-render world volume previews |
@@ -98,7 +100,7 @@ memory addresses, transforms of objects that aren't previewed.
 
 ## NPV-01 — The lighting signature is chosen by the wrong socket
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv01_light_sig_follows_previewed_socket`, `test_npv01_show_all_outputs_relights_only_the_shader_output` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv01_light_sig_follows_previewed_socket`, `test_npv01_show_all_outputs_relights_only_the_shader_output` fails on `0f04085` and passes now; **GUI verified** (Blender 5.2.2, MCP): group with outputs Color, BSDF, only BSDF linked; Shader Shape -> Cube, Key Light 2 -> 6, Environment -> forest each re-rendered the group node and the Output.
 - **Where:** `queue.py` `_rebuild_queue` (the `renders_as_shader(node)` test
   before `extra = esig + "|" + lsig`) and `eligibility.py`
   `renders_as_shader`, compared with `renderers.py` `render_shader`
@@ -167,7 +169,7 @@ def test_npv01_light_sig_follows_previewed_socket(mod):
 
 ## NPV-02 — Key Light doesn't re-render world volume previews
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv02_world_volume_follows_key_light` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv02_world_volume_follows_key_light` fails on `0f04085` and passes now; **GUI verified**: Key Light re-renders Volume Scatter only; Background and World Output are not re-queued. Note: the re-rendered volume preview looks the same: with EEVEE it is pixel-identical at Key Light 0 and 20 (max diff 0), with Cycles almost (max diff 0.043). The sun barely reaches the fog sphere, so this costs one render and shows no change.
 - **Where:** `queue.py` `_rebuild_queue` adds `lsig` only for `KIND_SHADER`.
   `renderers.py` `render_world` passes `props.sun_strength` to
   `ensure_preview_scene`, and in the volume branch that sun lights the sphere
@@ -212,7 +214,7 @@ def test_npv02_world_volume_follows_key_light(mod):
 
 ## NPV-03 — Texture paint while Auto Update / Show Previews is off is lost
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv03_image_updates_counted_while_auto_update_off` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv03_image_updates_counted_while_auto_update_off` fails on `0f04085` and passes now; **GUI verified**: with Auto Update off, then with Show Previews off, real `paint.image_paint` strokes only bumped the counter (no re-hash, no render); turning it back on re-rendered Image Texture, Emission and Output with the new strokes, without Refresh.
 - **Where:** `timer.py` `_on_depsgraph`. The `img_gen` counter (part of
   `hashing.py` `_image_sig`) is bumped only after the early `return` for
   `not props.enabled or not props.auto_update`.
@@ -259,7 +261,7 @@ def test_npv03_image_updates_counted_while_auto_update_off(mod):
 
 ## NPV-04 — Switching an editor to another tree keeps rendering the old one
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv04_switching_tree_drops_old_pending_renders` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv04_switching_tree_drops_old_pending_renders` fails on `0f04085` and passes now; **GUI verified**: compositor scenes with 15 / 4 nodes; an edit queued all 15, and switching the window scene with 7 still queued dropped them; only the new tree's nodes rendered after the switch. Switching back showed the 8 cached thumbnails at once and re-rendered only the 7 stale ones.
 - **Where:** `drawing.py` `_record_editor` overwrites the editor's entry when
   it now shows another tree, and never calls `_editors_gone` for the old one.
   `queue.py` `_rebuild_queue` only cleans up keys with the *current* tree's
@@ -324,7 +326,23 @@ def test_npv04_switching_tree_drops_old_pending_renders(mod):
 
 ## NPV-05 — Undo before the queue finishes leaves items with the newer hash
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv05_undo_to_shown_hash_dequeues` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`; its fix broke Refresh, fixed again in the
+  GUI-check commit. GUI verified (Blender 5.2.2, MCP).
+  - The GUI check found the regression: Refresh queues nodes whose hash equals
+    the shown one, and the plain rebuild a compositor render triggers (it sets
+    `dirty`) dequeued them through the new `_dequeue` in `_enqueue`'s early
+    returns. A 15-node compositor tree rendered 2 nodes on Refresh, then
+    nothing.
+  - Fix: queue items remember `force`; a pending forced item skips both early
+    returns and is only kept current (hash, source), so it renders the state
+    it is rendered in and stores that hash. Headless
+    `test_npv05_refresh_survives_a_plain_rebuild` fails on `784c146` and
+    passes now.
+  - GUI after the fix: Refresh renders all 15 compositor nodes. Refresh, edit,
+    immediate Ctrl+Z ends with every thumbnail at the undone state, the queue
+    empty and no orange outlines. The original step (21-node material, edit,
+    Ctrl+Z 0.4 s later): the 16 nodes still queued are dropped, the 5 already
+    re-rendered render once more, and the hashes match the pre-edit ones.
 - **Where:** `queue.py` `_enqueue`.
   - The early return (`hashes[key] == h and key in textures`) runs before the
     `queued_keys` branch.
@@ -374,7 +392,7 @@ def test_npv05_undo_to_shown_hash_dequeues(mod):
 
 ## NPV-06 — Muting a link doesn't re-render
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv06_link_mute_changes_hash` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv06_link_mute_changes_hash` fails on `0f04085` and passes now; **GUI verified**: `node.links_mute` (the Ctrl+Alt drag operator) on Noise -> Ramp re-rendered Ramp, BSDF and Output when muting, when changing Ramp's Fac while muted, and when unmuting.
 - **Where:** `hashing.py` `upstream_hash` hashes a linked input as
   `(from_socket, upstream hash)` and `tree_signature` hashes each link's ends.
   Neither includes `NodeLink.is_muted`. A muted link still shows in
@@ -410,7 +428,7 @@ def test_npv06_link_mute_changes_hash(mod):
 
 ## NPV-07 — Data behind an ID socket isn't hashed (Image / Object / Collection)
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI verified**: a real paint stroke on the image in the GN Image Texture socket re-rendered Set Position and Join; editing the Object Info object in Edit Mode rendered nothing until leaving Edit Mode, then ObjInfo and Join; moving it (Relative) re-rendered them. Note: in Original mode moving that object re-renders too (`_object_sig` always hashes `matrix_world`): extra renders, not stale ones; the acceptance's third bullet asked for Relative only.
 - **Where:** `hashing.py` `_socket_default`.
   - For an ID-valued socket, `float(v)` fails, so the value becomes `str(v)`,
     i.e. `<bpy_struct, Image("x") at 0x…>`: a name plus a memory address.
@@ -462,7 +480,7 @@ def test_npv07_gn_image_socket_follows_paint(mod):
 
 ## NPV-08 — Geometry previews depend on transforms the hash ignores
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv08_geo_preview_ignores_rotation_mode`, `test_npv08_geo_preview_ignores_scale_parent_constraints`, `test_npv08_tree_reading_self_transform_keeps_it` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv08_geo_preview_ignores_rotation_mode`, `test_npv08_geo_preview_ignores_scale_parent_constraints`, `test_npv08_tree_reading_self_transform_keeps_it` fails on `0f04085` and passes now; **GUI verified**: a quaternion-rotated cone previews upright (it previewed tilted before); scale (1, 1, 3), a rotated parent and a constraint change neither the hash nor the preview after Refresh. With Self Object -> Object Info in the tree, moving the object re-rendered Cone, Object Info and Set Position; moving / rotating / scaling a plain GN object re-rendered nothing.
 - **Where:** `renderers.py` `render_geo` sets `obj2.location` and
   `obj2.rotation_euler` to zero. The copy keeps:
   - `scale`
@@ -554,7 +572,7 @@ def test_npv08_geo_preview_ignores_rotation_mode(mod):
 
 ## NPV-09 — Group interface settings aren't hashed
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv09_interface_settings_in_signature` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv09_interface_settings_in_signature` fails on `0f04085` and passes now; Not GUI-checked (headless covers it, as agreed).
 - **Where:** `hashing.py` `tree_signature` covers nodes, unlinked defaults,
   output defaults and links, but not `tree.interface`. Interface settings
   change the result without touching any node:
@@ -595,7 +613,7 @@ def test_npv09_interface_settings_in_signature(mod):
 
 ## NPV-10 — GN previews use the modifiers' render visibility
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv10_geo_preview_uses_viewport_visibility` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv10_geo_preview_uses_viewport_visibility` fails on `0f04085` and passes now; **GUI verified**: GN modifier with Render off previews the GN cone (before: the base-mesh cube); Subdivision with Levels Viewport 0 / Render 3 previews the cube (before: the level-3 sphere). The user's modifier settings are unchanged.
 - **Where:** `renderers.py` `render_geo` renders through
   `preview_scene._render_scene` (`render.render`). Modifiers are evaluated
   with `show_render`, and Subdivision uses its render levels. Neither the
@@ -646,7 +664,7 @@ def test_npv10_geo_preview_uses_viewport_visibility(mod):
 
 ## NPV-11 — Compositor tree shared by two scenes
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv11_shared_comp_tree_prefers_the_window_scene` fails on `0f04085` and passes now; **GUI check pending** (local session).
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv11_shared_comp_tree_prefers_the_window_scene` fails on `0f04085` and passes now; **GUI verified**: scenes A and B share one compositor tree (Render Layers scene = B -> Blur -> Group Output + Viewer); after F12 on B and with B the window scene, previews render through B, and the Render Result and "Viewer Node" stay 640 x 360 after the previews and after an Auto Update re-render.
 - **Where:** `sources.py` `resolve_source` (KIND_COMP) returns the **first**
   scene in `bpy.data.scenes` whose `compositing_node_group` is the tree. The
   window's scene is never preferred: `drawing.py` `_editor_hint` records no
@@ -736,6 +754,26 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
   `tests/test_package_layout.py` still accept a single-file add-on, which no
   longer exists since the legacy file was dropped. This is dead code, not a
   bug.
+
+## Observations from the GUI check (not reopened)
+
+- **NPV-02:** the Key Light re-render of a world volume shows no visible
+  change (EEVEE: identical pixels at Key Light 0 and 20). Harmless, but the
+  render buys nothing; dropping the sun from the volume hash would be the
+  cheaper choice.
+- **NPV-07:** an Object Info node in Original mode re-renders when the other
+  object moves, though its Geometry output doesn't depend on the move
+  (`hashing._object_sig` always hashes `matrix_world`). Extra renders only.
+- **Compositor, Render Layers:** Blender's own node preview (the eye toggle
+  on Render Layers, on by default) is drawn under the add-on's thumbnail and
+  shows through its transparent background as a second, smaller image. Not
+  new in this batch; turning that node's preview off removes it.
+- **Viewer Node size:** once during the session the "Viewer Node" image was
+  found at 256 x 256 (the thumbnail size) after a long run of compositor
+  checks (shared tree, failing Render Layers, Ctrl+Z, a module reload).
+  None of those steps reproduced it when repeated one by one, and the Render
+  Result stayed 640 x 360 whenever it was measured. Watch for it with
+  checklist #5 / #53.
 
 ## Known limits of the fixes
 

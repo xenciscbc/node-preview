@@ -283,6 +283,69 @@ def test_npv05_undo_to_shown_hash_dequeues(mod):
         bpy.data.materials.remove(mat)
 
 
+def _queued_item(mod, node):
+    return next(it for it in mod._state["queue"] if it["node"] == node)
+
+
+def test_npv05_refresh_survives_a_plain_rebuild(mod):
+    """Found in the GUI check of NPV-05's fix: Refresh queues nodes whose hash
+    equals the shown one; a plain rebuild before the queue drains (a
+    compositor render sets dirty) dequeued them, so Refresh rendered only the
+    first batch. A forced item must stay queued, with the hash of the state
+    it will render (Refresh, edit, undo: back to the shown hash)."""
+    mat = bpy.data.materials.new("NPV_t_npv05r")
+    nt = mat.node_tree
+    noise = nt.nodes.new("ShaderNodeTexNoise")
+    noise.name = "Noise"
+    props = _props()
+    st = mod._state
+    K = mod.common.KIND_SHADER
+    scale = noise.inputs["Scale"]
+    try:
+        _clear(mod)
+        mod.queue.rebuild_queue(nt, K, props)
+        key = _queued_item(mod, "Noise")["key"]
+        _pretend_rendered(mod)
+        mod.queue.rebuild_queue(nt, K, props, force=True)       # Refresh
+        assert "Noise" in _queued_nodes(mod)
+        mod.queue.rebuild_queue(nt, K, props)                   # plain rebuild
+        assert "Noise" in _queued_nodes(mod), \
+            "a plain rebuild dropped the render Refresh queued"
+        assert _queued_item(mod, "Noise").get("force"), "the forced flag was lost"
+        scale.default_value += 1.0                              # edit
+        mod.queue.rebuild_queue(nt, K, props)
+        scale.default_value -= 1.0                              # undo
+        mod.queue.rebuild_queue(nt, K, props)
+        assert "Noise" in _queued_nodes(mod), "edit + undo dropped the Refresh render"
+        assert _queued_item(mod, "Noise")["hash"] == st["hashes"][key], \
+            "the Refresh render would store the undone edit's hash"
+        assert st["queued_keys"] == {it["key"] for it in st["queue"]}
+
+        # A failed render (no thumbnail): Refresh retries it, and a plain
+        # rebuild doesn't take that back.
+        _clear(mod)
+        mod.queue.rebuild_queue(nt, K, props)
+        it = _queued_item(mod, "Noise")
+        st["failed"][it["key"]] = it["hash"]
+        st["queue"].clear()
+        st["queued_keys"].clear()
+        mod.queue.rebuild_queue(nt, K, props)
+        assert "Noise" not in _queued_nodes(mod), "a failed render was retried unchanged"
+        mod.queue.rebuild_queue(nt, K, props, force=True)
+        mod.queue.rebuild_queue(nt, K, props)
+        assert "Noise" in _queued_nodes(mod), \
+            "a plain rebuild dropped the failed node Refresh queued"
+        scale.default_value += 1.0
+        mod.queue.rebuild_queue(nt, K, props)
+        scale.default_value -= 1.0
+        mod.queue.rebuild_queue(nt, K, props)
+        assert _queued_item(mod, "Noise")["hash"] == st["failed"][it["key"]], \
+            "the Refresh retry would record the undone edit's hash"
+    finally:
+        _clear(mod)
+        bpy.data.materials.remove(mat)
+
+
 # --------------------------------------------------------------------------- #
 #  NPV-06: link mute
 # --------------------------------------------------------------------------- #

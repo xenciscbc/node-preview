@@ -49,7 +49,15 @@ def _dequeue(key):
 
 def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
              chain=None):
-    if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
+    pending = None
+    if key in _state["queued_keys"]:
+        pending = next((it for it in _state["queue"] if it["key"] == key), None)
+    # A render Refresh queued is never dropped by a plain rebuild (one runs
+    # whenever something sets dirty, e.g. each compositor render), only kept
+    # current: it skips the two early returns below and gets the hash of the
+    # state it will render.
+    keep = force or (pending is not None and pending.get("force"))
+    if not keep and _state["hashes"].get(key) == h and key in _state["textures"]:
         # Back to what the thumbnail shows (e.g. undo after a failing edit):
         # a failure recorded for another hash no longer applies, and a render
         # still queued for the undone state is not needed.
@@ -59,25 +67,24 @@ def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
     # A render that failed is not retried until something it depends on
     # changes (or Refresh forces it): otherwise every edit anywhere in the
     # tree would re-run it -- a whole scene render for a compositor node.
-    if not force and _state["failed"].get(key) == h:
+    if not keep and _state["failed"].get(key) == h:
         _dequeue(key)
         return
-    if key in _state["queued_keys"]:
+    if pending is not None:
         # Still waiting: render it with what the hash now describes (the
         # source may have changed, e.g. another object made active).
-        for it in _state["queue"]:
-            if it["key"] == key:
-                it.update({"hash": h, "src": src[1], "src_type": src[0],
-                           "root": _idref(root or tree),
-                           "chain": list(chain or ())})
-                break
+        pending.update({"hash": h, "src": src[1], "src_type": src[0],
+                        "root": _idref(root or tree),
+                        "chain": list(chain or ())})
+        if force:
+            pending["force"] = True
         return
     _state["queue"].append({"kind": kind, "src": src[1], "src_type": src[0],
                             "tree": _idref(tree),
                             "root": _idref(root or tree),
                             "chain": list(chain or ()),
                             "node": node_name, "out": out_id, "key": key,
-                            "hash": h})
+                            "hash": h, "force": bool(force)})
     _state["queued_keys"].add(key)
 
 
