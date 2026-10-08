@@ -428,7 +428,14 @@ def test_npv06_link_mute_changes_hash(mod):
 
 ## NPV-07 — Data behind an ID socket isn't hashed (Image / Object / Collection)
 
-- **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI verified**: a real paint stroke on the image in the GN Image Texture socket re-rendered Set Position and Join; editing the Object Info object in Edit Mode rendered nothing until leaving Edit Mode, then ObjInfo and Join; moving it (Relative) re-rendered them. Note: in Original mode moving that object re-renders too (`_object_sig` always hashes `matrix_world`): extra renders, not stale ones; the acceptance's third bullet asked for Relative only.
+- **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI verified**: a real paint stroke on the image in the GN Image Texture socket re-rendered Set Position and Join; editing the Object Info object in Edit Mode rendered nothing until leaving Edit Mode, then ObjInfo and Join; moving it (Relative) re-rendered them. In Original mode, moving that object also re-rendered: `_object_sig` always hashed `matrix_world`. These were extra renders, not stale ones.
+- **Follow-up, fixed in `4aa430c`:** GUI check pending.
+  - An object's transform is now hashed only when the node reading it uses it:
+    - Object Info in Relative mode, or with a Transform / Location / Rotation / Scale output in use.
+    - Collection Info, always.
+  - Original mode with only Geometry (or As Instance) in use no longer re-renders on a move.
+  - Objects and collections set on an **Object / Collection input node**, or passed in on the **modifier panel**, were hashed by name only. They are now hashed like an ID socket.
+  - Headless tests: `tests/test_v143_object_refs.py`. Seven of them fail on `fe03c0c`; the other three guard behaviour that was already right.
 - **Where:** `hashing.py` `_socket_default`.
   - For an ID-valued socket, `float(v)` fails, so the value becomes `str(v)`,
     i.e. `<bpy_struct, Image("x") at 0x…>`: a name plus a memory address.
@@ -761,13 +768,18 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
   change (EEVEE: identical pixels at Key Light 0 and 20). Harmless, but the
   render buys nothing; dropping the sun from the volume hash would be the
   cheaper choice.
-- **NPV-07:** an Object Info node in Original mode re-renders when the other
-  object moves, though its Geometry output doesn't depend on the move
-  (`hashing._object_sig` always hashes `matrix_world`). Extra renders only.
-- **Compositor, Render Layers:** Blender's own node preview (the eye toggle
-  on Render Layers, on by default) is drawn under the add-on's thumbnail and
-  shows through its transparent background as a second, smaller image. Not
-  new in this batch; turning that node's preview off removes it.
+- *(Fixed in `4aa430c`, GUI check pending.)* **NPV-07:** an Object Info node
+  in Original mode re-rendered when the other object moved, though its
+  Geometry output doesn't depend on the move (`hashing._object_sig` always
+  hashed `matrix_world`). Extra renders only.
+- *(Fixed in `4aa430c`, GUI check pending.)* **Compositor, Render Layers:**
+  Blender's own node preview (the eye toggle on Render Layers, on by default)
+  is drawn under the add-on's thumbnail. It showed through the thumbnail's
+  transparent background as a second, smaller image.
+  - Cause: the compositor renders with a transparent film, and the backdrop
+    under the thumbnail was 85% opaque.
+  - Fix: the backdrop is now opaque (`drawing.py`). Test:
+    `tests/test_v143_comp_underlay.py`.
 - **Viewer Node size:** once during the session the "Viewer Node" image was
   found at 256 x 256 (the thumbnail size) after a long run of compositor
   checks (shared tree, failing Render Layers, Ctrl+Z, a module reload).
@@ -777,8 +789,9 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
 
 ## Known limits of the fixes
 
-- **NPV-07:** an object read through an Object / Collection socket is hashed
-  by its own data and its transform. Its *own modifiers* are not hashed: the
+- **NPV-07:** an object read through an Object / Collection socket, an
+  Object / Collection input node or the modifier panel is hashed by its own
+  data, and by its transform when the reading node uses it (`4aa430c`). Its *own modifiers* are not hashed: the
   node reads the evaluated object. Changing a modifier on that other object
   re-renders only with Refresh.
 - **NPV-07 / NPV-08:**
