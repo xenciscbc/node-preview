@@ -429,7 +429,13 @@ def test_npv06_link_mute_changes_hash(mod):
 ## NPV-07 — Data behind an ID socket isn't hashed (Image / Object / Collection)
 
 - **Status:** Fixed in `9a6c8dc`. Headless `test_npv07_gn_image_socket_follows_paint`, `test_npv07_object_info_follows_the_other_object` fails on `0f04085` and passes now; **GUI verified**: a real paint stroke on the image in the GN Image Texture socket re-rendered Set Position and Join; editing the Object Info object in Edit Mode rendered nothing until leaving Edit Mode, then ObjInfo and Join; moving it (Relative) re-rendered them. In Original mode, moving that object also re-rendered: `_object_sig` always hashed `matrix_world`. These were extra renders, not stale ones.
-- **Follow-up, fixed in `4aa430c`:** GUI check pending.
+- **Follow-up, fixed in `4aa430c`:** **GUI verified** (Blender 5.2.2, MCP;
+  checklist #64). Object input node -> Object Info (Original, only Geometry
+  in use) -> Transform: editing the read object's mesh rendered nothing in
+  Edit Mode and re-rendered Object Info and Transform after leaving it;
+  moving it re-rendered nothing; in Relative mode moving it re-rendered both.
+  The same three steps passed with the object passed in on the modifier
+  panel (Group Input Object socket). Headless: 182 passed in Blender 5.2.2.
   - An object's transform is now hashed only when the node reading it uses it:
     - Object Info in Relative mode, or with a Transform / Location / Rotation / Scale output in use.
     - Collection Info, always.
@@ -768,11 +774,11 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
   change (EEVEE: identical pixels at Key Light 0 and 20). Harmless, but the
   render buys nothing; dropping the sun from the volume hash would be the
   cheaper choice.
-- *(Fixed in `4aa430c`, GUI check pending.)* **NPV-07:** an Object Info node
+- *(Fixed in `4aa430c`, GUI verified.)* **NPV-07:** an Object Info node
   in Original mode re-rendered when the other object moved, though its
   Geometry output doesn't depend on the move (`hashing._object_sig` always
   hashed `matrix_world`). Extra renders only.
-- *(Fixed in `4aa430c`, GUI check pending.)* **Compositor, Render Layers:**
+- *(Fixed in `4aa430c`, GUI verified: checklist #65.)* **Compositor, Render Layers:**
   Blender's own node preview (the eye toggle on Render Layers, on by default)
   is drawn under the add-on's thumbnail. It showed through the thumbnail's
   transparent background as a second, smaller image.
@@ -780,6 +786,12 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
     under the thumbnail was 85% opaque.
   - Fix: the backdrop is now opaque (`drawing.py`). Test:
     `tests/test_v143_comp_underlay.py`.
+  - GUI: Blender only draws its own preview once it has run the compositor
+    on the tree with something showing its result. To reproduce: F12 once,
+    and an Image Editor showing the Render Result (a Viewer node in the
+    tree). Then 1.4.1 showed the ghost after a Blur edit; `4aa430c` doesn't,
+    though Blender's preview is there (seen with the add-on's previews off).
+    Checkerboard still draws; shader, world and GN thumbnails look as before.
 - **Viewer Node size:** once during the session the "Viewer Node" image was
   found at 256 x 256 (the thumbnail size) after a long run of compositor
   checks (shared tree, failing Render Layers, Ctrl+Z, a module reload).
