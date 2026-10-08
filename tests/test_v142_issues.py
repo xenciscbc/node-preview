@@ -404,6 +404,9 @@ def test_npv07_object_info_follows_the_other_object(mod):
     def build(ng, go):
         info = ng.nodes.new("GeometryNodeObjectInfo")
         info.name = "Info"
+        # Relative: the move counts. (In Original mode with only Geometry
+        # used it doesn't: test_v143_object_refs.)
+        info.transform_space = "RELATIVE"
         info.inputs["Object"].default_value = other
         ng.links.new(info.outputs["Geometry"], go.inputs[0])
 

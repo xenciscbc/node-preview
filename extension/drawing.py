@@ -417,8 +417,11 @@ def draw_callback():
     for _top, node, cells, cols, gx0, gy0, gw, gh, cw in sorted(
             jobs, key=lambda j: j[0]):
         n = len(cells)
-        # One dark backdrop + outer border for the whole grid.
-        _draw_rect((0.05, 0.05, 0.05, 0.85), gx0 - pad, gy0 - pad, gx0 + gw + pad, gy0 + gh + pad)
+        # One dark backdrop + outer border for the whole grid. Opaque:
+        # Blender draws its own node preview (Render Layers' eye toggle) at
+        # the same place first, and would show through a thumbnail's
+        # transparent edges (compositor renders use a transparent film).
+        _draw_rect((0.05, 0.05, 0.05, 1.0), gx0 - pad, gy0 - pad, gx0 + gw + pad, gy0 + gh + pad)
         oname = {s.identifier: (s.name or s.identifier) for s in node.outputs}
         for i, (oid, k, tex, st) in enumerate(cells):
             col = i % cols

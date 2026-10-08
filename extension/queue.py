@@ -18,8 +18,8 @@ from .eligibility import (
     _preview_targets, _zone_cache, node_eligible, renders_as_shader,
 )
 from .hashing import (
-    _STRUCT_SKIP, _isolated_hash, _plain, _simple_props_sig, tree_signature,
-    upstream_hash,
+    _STRUCT_SKIP, _id_value_sig, _isolated_hash, _plain, _simple_props_sig,
+    output_reads_transform, tree_signature, upstream_hash,
 )
 from .sources import _idget, _idref, resolve_source
 from .renderers import (
@@ -166,8 +166,17 @@ def _gn_inputs_sig(m):
         if v is None:
             continue
         try:
-            out.append((item.identifier, _simple_props_sig(v),
-                        _plain(getattr(v, "value", None))))
+            val = getattr(v, "value", None)
+            if isinstance(val, (bpy.types.Object, bpy.types.Collection)):
+                # An object / collection passed in: by content, like an ID
+                # socket; the transform only if a node it reaches uses it.
+                val = _id_value_sig(val, any(
+                    output_reads_transform(o)
+                    for n in ng.nodes if n.bl_idname == "NodeGroupInput"
+                    for o in n.outputs if o.identifier == item.identifier))
+            else:
+                val = _plain(val)
+            out.append((item.identifier, _simple_props_sig(v), val))
         except Exception:
             pass
     return tuple(out)
