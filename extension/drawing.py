@@ -160,9 +160,9 @@ def _grid_origin(pos, x0, x1, y0, node_h, gw, gh, gap):
 
 
 def _editor_hint(ctx, space):
-    """Which material / light / object the editor shows (its id / id_from
-    and, unless it is pinned, the active object), so the queue previews
-    through it (see resolve_source)."""
+    """Which material / light / object (compositor: scene) the editor shows
+    (its id / id_from and, unless it is pinned, the active object), so the
+    queue previews through it (see resolve_source)."""
     objs = [getattr(space, "id", None), getattr(space, "id_from", None)]
     if not getattr(space, "pin", False):
         objs.append(getattr(ctx, "active_object", None))
@@ -178,6 +178,12 @@ def _editor_hint(ctx, space):
             hint.append(("OBJ", _idref(d)))
             if isinstance(d.data, bpy.types.Light):
                 hint.append(("LIGHT", _idref(d.data)))
+    # A compositor tree can be shared by several scenes (Scene.copy() shares
+    # it): preview it through the window's scene, not the first one using it.
+    if getattr(space, "tree_type", None) == "CompositorNodeTree":
+        scene = getattr(ctx, "scene", None)
+        if scene is not None:
+            hint.append(("SCENE", _idref(scene)))
     return list(dict.fromkeys(hint))
 
 
@@ -200,10 +206,15 @@ def _record_editor(ctx, space, ptr, kind, path, props, tree):
     new_view = (ptr, kind, path, hint, pinned, sel)
     if old is None or old["view"] != new_view:
         _state["dirty"] = True
+    left = dict(old) if old is not None and old.get("tree") != ptr else None
     ent = old or {"visible": set(), "priority": set()}
     ent.update({"view": new_view, "tree": ptr, "kind": kind, "path": path,
                 "hint": hint, "pinned": pinned})
     eds[sptr] = ent
+    if left is not None:
+        # The editor switched to another tree (another material, object or
+        # scene): the one it showed is gone from it, like a closed editor.
+        _editors_gone([left])
     # The last drawn editor, for code / tests that look at one editor.
     _state["active_tree_ptr"] = ptr
     _state["active_kind"] = kind

@@ -59,6 +59,7 @@ _state = {
     "active_path": None,  # editor tree path (pointers, outermost first)
     "shader_image": None, "sel_sig": None,
     "img_gen": {},        # image name -> update counter (texture paint)
+    "xform_watch": set(), # objects whose transform a preview's hash holds
     "tex_tick": {},       # texture key -> last-used tick (cache eviction)
     "tick": 0, "prune_in": 0,
     "failed": {},         # texture key -> hash whose render failed (no retry)

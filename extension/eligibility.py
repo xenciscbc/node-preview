@@ -206,8 +206,11 @@ def node_eligible(node, kind, props):
     return False
 
 
-def renders_as_shader(node):
+def renders_as_shader(node, out_id=None):
+    """Does the preview of this output render lit (sphere / cube, preview
+    lights)? Decided by the previewed output, as render_shader does: a group
+    whose first output is a colour still previews its BSDF output lit."""
     if node.bl_idname in SHADER_OUTPUT_NODES:
         return True
-    o = first_enabled_output(node)
+    o = _out_by_id(node, out_id)
     return o is not None and o.type == "SHADER"

@@ -11,8 +11,8 @@ import numpy as np
 
 from . import sources, timer
 from .common import (
-    KIND_COMP, KIND_GEO, KIND_SHADER, KIND_WORLD, MAX_TEXTURES, _engine_id,
-    _key_ctx, _skey, _state, _view_ctx,
+    KIND_COMP, KIND_GEO, KIND_SHADER, KIND_WORLD, MAX_TEXTURES, VOLUME_NODES,
+    _engine_id, _key_ctx, _skey, _state, _view_ctx,
 )
 from .eligibility import (
     _preview_targets, _zone_cache, node_eligible, renders_as_shader,
@@ -23,8 +23,8 @@ from .hashing import (
 )
 from .sources import _idget, _idref, resolve_source
 from .renderers import (
-    _context_sig, _geo_modifier_index, _instance_chain, render_compositor,
-    render_geo, render_shader, render_world,
+    _context_sig, _geo_modifier_index, _instance_chain, reads_object_transform,
+    render_compositor, render_geo, render_shader, render_world,
 )
 
 
@@ -41,17 +41,26 @@ def _light_sig(props):
                                 getattr(props, "preview_env", "UNIFORM"))
 
 
+def _dequeue(key):
+    if key in _state["queued_keys"]:
+        _state["queue"][:] = [it for it in _state["queue"] if it["key"] != key]
+        _state["queued_keys"].discard(key)
+
+
 def _enqueue(kind, src, tree, node_name, out_id, key, h, force, root=None,
              chain=None):
     if not force and _state["hashes"].get(key) == h and key in _state["textures"]:
         # Back to what the thumbnail shows (e.g. undo after a failing edit):
-        # a failure recorded for another hash no longer applies.
+        # a failure recorded for another hash no longer applies, and a render
+        # still queued for the undone state is not needed.
         _state["failed"].pop(key, None)
+        _dequeue(key)
         return
     # A render that failed is not retried until something it depends on
     # changes (or Refresh forces it): otherwise every edit anywhere in the
     # tree would re-run it -- a whole scene render for a compositor node.
     if not force and _state["failed"].get(key) == h:
+        _dequeue(key)
         return
     if key in _state["queued_keys"]:
         # Still waiting: render it with what the hash now describes (the
@@ -178,6 +187,12 @@ def _geo_source_sig(obj_ref, root):
     # name), so they are read here, not cached with the mesh.
     parts.append(tuple(g.name for g in obj.vertex_groups))
     parts.append(_data_sig(obj.data, obj))
+    # Previews keep the object's placement only for a tree that reads it
+    # (render_geometry): then it is part of the hash, and moving the object
+    # re-hashes (timer._on_depsgraph).
+    if reads_object_transform(root):
+        _state["xform_watch"].add(obj.name)
+        parts.append(tuple(round(x, 5) for row in obj.matrix_world for x in row))
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
 
 
@@ -410,17 +425,24 @@ def _rebuild_queue(tree, kind, props, force, path):
                 h = upstream_hash(node, memo)
         except Exception:
             continue
-        if kind == KIND_SHADER and renders_as_shader(node):
-            extra = esig + "|" + lsig
-        elif gsig and any(s.type == "GEOMETRY" for s in node.outputs):
-            extra = esig + gsig
+        if gsig and any(s.type == "GEOMETRY" for s in node.outputs):
+            base = h + esig + gsig
         else:
-            extra = esig
-        h = hashlib.md5((h + extra).encode("utf-8", "replace")).hexdigest()
+            base = h + esig
         for out_id in _preview_targets(node, kind, props):
+            # The preview lights only reach lit previews: a shader output
+            # (sphere / cube), or a world volume (fog on a sphere lit by the
+            # key light).
+            if kind == KIND_SHADER and renders_as_shader(node, out_id):
+                extra = "|" + lsig
+            elif kind == KIND_WORLD and node.bl_idname in VOLUME_NODES:
+                extra = "|%.4f" % props.sun_strength
+            else:
+                extra = ""
+            ho = hashlib.md5((base + extra).encode("utf-8", "replace")).hexdigest()
             key = _skey(tree, node.name, out_id, ctx)
             live.add(key)
-            _enqueue(kind, src, tree, node.name, out_id, key, h, force,
+            _enqueue(kind, src, tree, node.name, out_id, key, ho, force,
                      root, chain)
     # Thumbnails of this tree that are no longer shown (node deleted or
     # renamed, output switched, filtered out) only hold GPU memory.
@@ -472,6 +494,7 @@ def _reset_cache():
         _state[k].clear()
     _state["queue"].clear()
     _state["queued_keys"].clear()
+    _state["xform_watch"].clear()
     _state["visible"] = set()
     _state["priority"] = set()
 

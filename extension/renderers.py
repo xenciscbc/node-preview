@@ -15,7 +15,7 @@ from .common import (
     SHADER_OUTPUT_NODES, VOLUME_NODES, _engine_id, _state,
 )
 from .eligibility import _out_by_id
-from .hashing import _SKIP_PROPS, _socket_default, upstream_hash
+from .hashing import _SKIP_PROPS, _interface_sig, _socket_default, upstream_hash
 from .preview_scene import _finish, ensure_preview_scene
 
 
@@ -62,6 +62,9 @@ def _context_sig(src, path, chain):
     for parent, name in zip(path, chain):
         inst = parent.nodes.get(name)
         parts.append((name, _inputs_sig(inst, {}) if inst is not None else None))
+    # The groups' interfaces: a Default Input or a min / max changes what the
+    # Group Input inside passes on.
+    parts.extend(_interface_sig(t) for t in path[1:])
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
 
 
@@ -314,6 +317,44 @@ def _frame_object(scn, cam, obj):
     cam.data.ortho_scale = max(radius * 2.3, 0.2)
 
 
+# Nodes whose result depends on the object's own placement.
+_SELF_XFORM_NODES = {"GeometryNodeSelfObject"}
+_RELATIVE_NODES = {"GeometryNodeObjectInfo", "GeometryNodeCollectionInfo"}
+
+
+def reads_object_transform(tree, _seen=frozenset()):
+    """Does a Geometry Nodes tree (or a group in it) read the evaluated
+    object's transform: Self Object, or Object / Collection Info in Relative
+    mode? Then its previews keep the object's placement (and hash it)."""
+    if tree is None or tree.as_pointer() in _seen:
+        return False
+    seen = _seen | {tree.as_pointer()}
+    for n in tree.nodes:
+        if n.bl_idname in _SELF_XFORM_NODES:
+            return True
+        if n.bl_idname in _RELATIVE_NODES \
+                and getattr(n, "transform_space", "") == "RELATIVE":
+            return True
+        if getattr(n, "node_tree", None) is not None \
+                and reads_object_transform(n.node_tree, seen):
+            return True
+    return False
+
+
+def _neutral_transform(ob):
+    """No placement at all on the preview copy: the geometry the nodes make,
+    in object space, whatever the object's rotation mode, scale, deltas,
+    parent or constraints (the frame is fitted to it afterwards)."""
+    ob.parent = None
+    for c in ob.constraints:
+        c.mute = True
+    ob.location = ob.delta_location = (0, 0, 0)
+    ob.rotation_euler = ob.delta_rotation_euler = (0, 0, 0)
+    ob.rotation_quaternion = ob.delta_rotation_quaternion = (1, 0, 0, 0)
+    ob.rotation_axis_angle = (0, 0, 1, 0)
+    ob.scale = ob.delta_scale = (1, 1, 1)
+
+
 def _geo_modifier_index(obj, tree=None):
     """Index of the Geometry Nodes modifier using ``tree`` (the first GN
     modifier when ``tree`` is None), or None."""
@@ -368,6 +409,12 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=No
         for later in list(obj2.modifiers)[idx + 1:]:
             later.show_viewport = False
             later.show_render = False
+        # The preview renders, but should show what the viewport shows: the
+        # modifiers' viewport toggles and subdivision levels.
+        for m in list(obj2.modifiers)[:idx + 1]:
+            m.show_render = m.show_viewport
+            if hasattr(m, "render_levels") and hasattr(m, "levels"):
+                m.render_levels = m.levels
         if chain:
             _n, gos, copies = _route_out(
                 ng2, chain, node_name, lambda n: _geometry_out(n, out_id))
@@ -389,8 +436,8 @@ def render_geometry(obj, node_name, res, props, out_id=None, tree=None, chain=No
         ng2.links.new(setm.outputs["Geometry"], goin)
 
         scn.collection.objects.link(obj2)
-        obj2.location = (0, 0, 0)
-        obj2.rotation_euler = (0, 0, 0)
+        if not reads_object_transform(tree):
+            _neutral_transform(obj2)
         # Object-linked material slots would override the clay material; they
         # belong to obj2 only, so this doesn't touch the user's object.
         for slot in obj2.material_slots:
@@ -572,6 +619,9 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
         # must read the copy instead: the render pipeline also renders each
         # other scene the tree reads, at the copy's thumbnail size, which
         # overwrote the user's Render Result and so the Viewer's input.
+        # (A node reading a third scene, neither this one nor a copy of it,
+        # still renders that scene: it can't be redirected without changing
+        # what the node shows.)
         for t in [tree] + copies:
             for n in list(t.nodes):
                 if n.bl_idname in ("CompositorNodeViewer", "CompositorNodeOutputFile"):

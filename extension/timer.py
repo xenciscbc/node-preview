@@ -174,13 +174,19 @@ _DATA_ID_TYPES = {"MESH", "CURVE", "CURVES", "POINTCLOUD", "VOLUME", "LATTICE",
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
         return
-    # Which object data changed is recorded even while previews are off or
-    # Auto Update is off: the fingerprints are cached (_data_sig), and an
-    # edit made meanwhile must not be missed once previews come back.
+    # Which images and object data changed is recorded even while previews
+    # are off or Auto Update is off: the fingerprints are cached (_data_sig,
+    # img_gen), and an edit made meanwhile must not be missed once previews
+    # come back.
     for upd in depsgraph.updates:
         idt = getattr(upd.id, "id_type", "")
         try:
-            if idt in _DATA_ID_TYPES:
+            if idt == "IMAGE":
+                # Texture paint sends Image updates; the counter is part of
+                # the image's hash so textures using it re-render.
+                name = getattr(upd.id, "original", upd.id).name
+                _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
+            elif idt in _DATA_ID_TYPES:
                 queue._mark_data_changed(_idref(getattr(upd.id, "original", upd.id)))
             elif idt == "KEY":
                 # A shape key slider: the Key's user is the mesh / curve.
@@ -201,22 +207,21 @@ def _on_depsgraph(scene, depsgraph):
         return
     for upd in depsgraph.updates:
         idt = getattr(upd.id, "id_type", "")
-        if idt == "IMAGE":
-            # Texture paint sends Image updates; the counter is part of the
-            # image's hash so textures using it re-render.
-            name = upd.id.name
-            _state["img_gen"][name] = _state["img_gen"].get(name, 0) + 1
-            _state["dirty"] = True
-        elif idt in _DATA_ID_TYPES or idt == "KEY":
-            # An object's own data may have changed (recorded above): re-hash;
-            # its content is part of its GN previews' hash (_data_sig).
+        if idt == "IMAGE" or idt in _DATA_ID_TYPES or idt == "KEY":
+            # An image (texture paint) or an object's own data may have
+            # changed (recorded above): re-hash; the image's counter is part
+            # of its hash, the data's content of its GN previews' (_data_sig).
             _state["dirty"] = True
         elif idt == "OBJECT":
             # Moving / rotating an object changes nothing a preview shows
-            # (geometry previews render a copy at the origin), and would
-            # otherwise re-hash the whole tree every tick during a drag.
+            # (geometry previews render a copy with a neutral transform), and
+            # would otherwise re-hash the whole tree every tick during a drag.
+            # Except an object a tree reads the transform of (Object Info,
+            # Self Object ...): its transform is part of the hash.
             if upd.is_updated_transform and not upd.is_updated_geometry \
-                    and not upd.is_updated_shading:
+                    and not upd.is_updated_shading \
+                    and getattr(getattr(upd.id, "original", upd.id), "name", None) \
+                    not in _state["xform_watch"]:
                 continue
             _state["dirty"] = True
         elif idt in {"MATERIAL", "NODETREE", "WORLD", "SCENE", "LIGHT"}:

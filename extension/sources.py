@@ -75,7 +75,7 @@ def resolve_source(tree, kind):
                 return ("OBJ", _idref(obj))
         return None
     if kind == KIND_COMP:
-        for s in bpy.data.scenes:
+        for s in _hinted("SCENE", bpy.data.scenes) + list(bpy.data.scenes):
             if getattr(s, "compositing_node_group", None) == tree:
                 return ("SCENE", _idref(s))
         return None

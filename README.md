@@ -14,7 +14,8 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
 - **World** — environment swatches; a **volume** node (fog) is shown on a lit
   sphere instead (a global world volume renders black as a plain 360°).
 - **Geometry Nodes** — a small shaded (clay) **3D render of the geometry** at
-  each node; texture / math / colour nodes can show a flat swatch of the node
+  each node, as the nodes make it (the object's own rotation, scale and parent
+  are left out, unless the tree reads them); texture / math / colour nodes can show a flat swatch of the node
   alone (fields linked into it are not evaluated; its own input values stand
   in, so upstream edits don't re-render it).
 - **Compositor** — each node's **image result** (renders the scene through the
@@ -33,7 +34,8 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   Selected and on-screen nodes render first; a **Time Budget** keeps each step
   short so the UI stays responsive. Previews pause during animation playback
   unless **Update on Frame Change** is on (Scene Time, image sequences, ...).
-  Moving objects no longer triggers re-hashing.
+  Moving objects no longer triggers re-hashing (except for a tree that reads
+  an object's placement: Object Info, Self Object).
 - **Shared trees** — a Geometry Nodes tree used by several objects previews
   the active one; a material previews through the one shown in the editor.
 - **Preview Scope** (All / Selected / Marked) to control which nodes preview —
@@ -118,7 +120,8 @@ to write `dist/node_preview-<ver>.zip`.
 The build is gated; nothing is written unless all of these pass:
 1. The manifest version is newer than every release tag (`vX.Y.Z`) in git;
    if `v<ver>` already exists it must point at the current commit (rebuilding
-   that release). Run `git fetch --tags` first in a fresh clone.
+   that release), with no uncommitted changes in `extension/`. Run
+   `git fetch --tags` first in a fresh clone.
 2. The headless test suite passes against `extension/`.
 3. `blender --command extension validate` accepts the zip.
 
@@ -145,7 +148,8 @@ acceptance criteria, are in `tests/open_issues.md`.
 2. Commit, and merge to `main`.
 3. On GitHub: **Releases → Draft a new release**, tag `v<ver>` on `main`
    (created on publish), attach `dist/node_preview-<ver>.zip`, publish.
-   Once the tag exists, the next build refuses the same version.
+   Once the tag exists, a build of the same version on any other commit is
+   refused.
 
 Zips of versions before 1.4.0 are in git history, e.g.
 `git show v1.3.0:dist/node_preview-1.3.0.zip > node_preview-1.3.0.zip`.

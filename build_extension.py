@@ -9,7 +9,8 @@ to a GitHub Release (see README).
 Release gate -- nothing is written unless every step passes:
   1. The manifest version is newer than every release tag (``vX.Y.Z``) in
      git. If ``v<version>`` itself already exists it must point at HEAD
-     (rebuilding that release), not at another commit.
+     (rebuilding that release), not at another commit, and ``extension/``
+     must have no uncommitted changes.
   2. The headless test suite (run_tests.py) passes against ``extension/``.
   3. ``blender --command extension validate`` accepts the zip.
 
@@ -80,6 +81,11 @@ def check_version(version):
     if version in tags and tag_commit(version) != _git("rev-parse", "HEAD"):
         fail("v%s is already tagged on another commit; bump the version "
              "(or check out v%s to rebuild that release)" % (version, version))
+    if version in tags and _git("status", "--porcelain", "--", "extension"):
+        # Rebuilding a release must give the release's files, not edits on
+        # top of it. (A new version is built before it is committed.)
+        fail("rebuilding the tagged release v%s, but extension/ has "
+             "uncommitted changes" % version)
     if not tags:
         print("NOTE: no release tags found; run 'git fetch --tags' if this "
               "is a fresh clone")

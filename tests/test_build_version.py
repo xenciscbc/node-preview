@@ -6,11 +6,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import build_extension as be  # noqa: E402
 
-def _gate(tags, head="aaa", tagged=None, version="1.4.0"):
+def _gate(tags, head="aaa", tagged=None, version="1.4.0", status=""):
     saved = be.release_tags, be.tag_commit, be._git
     be.release_tags = lambda: tags
     be.tag_commit = lambda v: tagged
-    be._git = lambda *a: head
+    be._git = lambda *a: status if a[0] == "status" else head
     try:
         be.check_version(version)
         return None
@@ -33,6 +33,14 @@ def test_not_newer_than_a_tag_fails(mod):
 def test_own_tag_must_be_head(mod):
     assert _gate(["1.3.0", "1.4.0"], head="aaa", tagged="aaa") is None
     assert "already tagged" in _gate(["1.3.0", "1.4.0"], head="aaa", tagged="bbb")
+
+
+def test_rebuilding_a_tag_needs_a_clean_tree(mod):
+    # NPV-12: the zip of a tagged release must hold the release's files.
+    dirty = " M extension/queue.py"
+    assert "uncommitted" in _gate(["1.3.0", "1.4.0"], tagged="aaa", status=dirty)
+    # A new version is built before it is committed: a dirty tree is fine.
+    assert _gate(["1.3.0"], status=dirty) is None
 
 
 def test_version_must_be_x_y_z(mod):

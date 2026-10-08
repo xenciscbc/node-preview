@@ -16,6 +16,8 @@ def _socket_default(sock):
         v = sock.default_value
     except Exception:
         return None
+    if isinstance(v, bpy.types.ID) or v is None and sock.type in _ID_SOCKETS:
+        return _id_value_sig(v)
     if hasattr(v, "__len__"):
         try:
             return tuple(round(float(x), 6) for x in v)
@@ -25,6 +27,42 @@ def _socket_default(sock):
         return round(float(v), 6)
     except Exception:
         return str(v)
+
+
+_ID_SOCKETS = {"IMAGE", "OBJECT", "COLLECTION", "MATERIAL", "TEXTURE"}
+
+
+def _object_sig(ob):
+    """What a node reading another object through a socket (Object Info,
+    Collection Info) gets from it: its data's content and its transform. Its
+    name goes into ``_state["xform_watch"]`` so moving it re-hashes (moves
+    are otherwise ignored, see timer._on_depsgraph)."""
+    # queue imports this module: imported here, when hashing (it holds the
+    # cached object data fingerprints, _data_sig).
+    from . import queue
+    _state["xform_watch"].add(ob.name)
+    return ("OB", ob.name, getattr(ob.library, "filepath", None),
+            queue._data_sig(ob.data, ob),
+            tuple(round(x, 5) for row in ob.matrix_world for x in row))
+
+
+def _id_value_sig(v):
+    """The value of an ID socket (Image, Object, Collection, Material ...):
+    for an image or an object what its pixels / data and transform are, not
+    just its name -- painting or editing it must re-render. Never ``str(v)``:
+    that holds a memory address."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, bpy.types.Image):
+            return ("IMG",) + _image_sig(v)
+        if isinstance(v, bpy.types.Object):
+            return _object_sig(v)
+        if isinstance(v, bpy.types.Collection):
+            return ("CO", v.name, tuple(_object_sig(o) for o in v.all_objects))
+    except Exception:
+        pass
+    return ("ID", v.name, getattr(v.library, "filepath", None))
 
 
 _SKIP_PROPS = {
@@ -166,9 +204,12 @@ def upstream_hash(node, memo):
     memo[ptr] = "0"
     parts = [node.bl_idname, _node_settings(node)]
     for inp in node.inputs:
-        if inp.is_linked:
+        # A muted link still shows in inp.links, but the input then reads its
+        # own value: hashed as if unlinked.
+        links = [l for l in inp.links if not l.is_muted]
+        if links:
             srcs = [(l.from_socket.identifier, upstream_hash(l.from_node, memo))
-                    for l in inp.links]
+                    for l in links]
             parts.append(("L", inp.identifier, tuple(srcs)))
         else:
             parts.append(("D", inp.identifier, _socket_default(inp)))
@@ -208,14 +249,39 @@ def tree_signature(tree, _seen=frozenset()):
     for n in tree.nodes:
         parts.append((n.name, n.bl_idname, n.mute, _node_settings(n, seen)))
         for inp in n.inputs:
-            if not inp.is_linked:
+            if not any(not l.is_muted for l in inp.links):
                 parts.append((n.name, inp.identifier, _socket_default(inp)))
         for out in n.outputs:  # RGB / Value nodes
             parts.append((n.name, "O", out.identifier, _socket_default(out)))
     for l in tree.links:
         parts.append((l.from_node.name, l.from_socket.identifier,
-                      l.to_node.name, l.to_socket.identifier))
+                      l.to_node.name, l.to_socket.identifier, l.is_muted))
+    parts.append(_interface_sig(tree))
     hv = hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
     if memo is not None:
         memo[ptr] = hv
     return hv
+
+
+# Interface settings that don't change what a group computes.
+_INTERFACE_SKIP = {"name", "description", "default_closed", "hide_in_modifier",
+                   "force_non_field", "panel_toggle"}
+
+
+def _interface_sig(tree):
+    """A group's interface settings that change its result: a socket's
+    Default Input (Position, Normal, Index ... used when the group node's
+    input is unlinked), min / max (clamp the value passed in), type. Not its
+    name or tooltip."""
+    out = []
+    iface = getattr(tree, "interface", None)
+    for item in getattr(iface, "items_tree", ()):
+        if getattr(item, "item_type", "") != "SOCKET":
+            continue
+        try:
+            out.append((item.identifier, tuple(
+                (pid, v) for pid, v in _simple_props_sig(item)
+                if pid not in _INTERFACE_SKIP)))
+        except Exception:
+            pass
+    return tuple(out)
