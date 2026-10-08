@@ -135,6 +135,8 @@ python run_tests.py extension queue  # only tests whose name contains "queue"
 
 Checks that need the real node-editor UI are listed in
 `tests/gui_checklist.md`.
+Bugs found in review but not yet fixed, each with a repro test and
+acceptance criteria, are in `tests/open_issues.md`.
 
 ## Releasing
 
