@@ -66,7 +66,7 @@ def _queued_nodes(mod):
 | NPV-05 | Low | All | Undoing an edit before its renders finish renders those nodes twice and leaves wrong "waiting" markers |
 | NPV-06 | Medium | All | Muting / unmuting a link doesn't re-render |
 | NPV-07 | Medium | Geometry Nodes | Edits behind an Image / Object / Collection *socket* don't re-render |
-| NPV-08 | Medium | Geometry Nodes | Geometry previews depend on scale, quaternion rotation and parent, but changing them doesn't re-render |
+| NPV-08 | Medium | Geometry Nodes | Geometry previews depend on scale, quaternion rotation and parent, but changing them doesn't re-render (decided: neutralise them) |
 | NPV-09 | Low | Groups | Group interface changes (Default Input, min / max) don't re-render |
 | NPV-10 | Low | Geometry Nodes | Previews use render visibility of modifiers, not viewport visibility |
 | NPV-11 | Medium | Compositor | Two scenes sharing a compositor tree: previews always show the first scene, and can overwrite the other scene's Render Result |
@@ -466,17 +466,35 @@ def test_npv07_gn_image_socket_follows_paint(mod):
      `rotation_mode = 'QUATERNION'`.
   2. Rotate it 90° about X. Separately, scale it (1, 1, 3), and parent it to a
      rotated empty.
-- **Expect, either:**
-  - (a) the previews ignore all of these (a neutral transform, like the
-    location and Euler rotation already are), or
-  - (b) they re-render when these change.
-
-  Pick one and apply it the same way for every rotation mode. (a) matches
-  "Moving objects no longer triggers re-hashing" in the README.
+- **Decision: (a) neutral transform, with one exception.**
+  - The preview ignores scale, every rotation mode (Euler, quaternion,
+    axis-angle), delta transforms, the parent and constraints, as it already
+    ignores location and Euler rotation. Change only the copy `obj2`: clear
+    its parent, disable its constraints, and leave its `matrix_world` at
+    identity.
+  - **Exception:** when the tree, or a group it uses, has a node that reads
+    object transforms, the preview differs from the viewport without them.
+    Examples: Self Object, or Object Info in Relative mode. Then keep the
+    previewed object's transform, add it (`matrix_world`, rounded) to that
+    tree's geometry hash, and re-render when it changes.
+  - Why (a):
+    - The code already intends it: location and Euler rotation are zeroed.
+      Only the other transform parts were missed, so today an Euler-mode
+      object previews upright and a quaternion-mode one (common after glTF
+      import) previews rotated.
+    - Transform-only updates are skipped on purpose (`timer.py`
+      `_on_depsgraph`; README: "Moving objects no longer triggers
+      re-hashing"). Hashing transforms would re-render every GN preview on
+      every tick of a rotate or scale drag.
+    - Node trees work in object space. The transform is applied after them,
+      so "what this node makes" is the local-space result. `_frame_object`
+      already hides uniform scale.
+  - Accepted cost: non-uniform scale (e.g. a squashed object) doesn't show in
+    the preview.
 
 ```python
 def test_npv08_geo_preview_ignores_rotation_mode(mod):
-    """Option (a): a quaternion rotation must not show in the preview, as an
+    """A quaternion rotation must not show in the preview, as an
     Euler rotation doesn't. Compares the rendered pixels of the same object
     with and without the rotation."""
     from npv_testutil import capture_renders
@@ -505,14 +523,18 @@ def test_npv08_geo_preview_ignores_rotation_mode(mod):
 ```
 
 - **Acceptance:**
-  - For option (a): the test passes, and the same holds for scale, delta
-    transforms and a rotated parent.
+  - The test passes, and the same holds for non-uniform scale, delta
+    transforms, axis-angle rotation, a rotated parent and a constraint that
+    rotates the object.
+  - Exception: a tree with Self Object, or with Object Info in Relative mode,
+    re-queues its geometry nodes when the object is rotated or moved. A tree
+    without them doesn't, and moving a plain GN object still re-renders
+    nothing (README).
+  - The user's object keeps its parent, constraints and transform: only
+    `obj2` is changed.
   - `test_v140_framing` still passes. It expects a scaled or parented object
-    to stay framed. If option (a) changes what it checks, update its
+    to stay framed. If the change alters what it checks, update its
     docstring to match.
-  - For option (b), write the test the other way round: changing each
-    transform re-queues the geometry nodes. Moving the object still must not
-    (README).
 
 ## NPV-09 — Group interface settings aren't hashed
 
