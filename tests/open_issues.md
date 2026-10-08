@@ -799,6 +799,14 @@ def test_npv11_shared_comp_tree_prefers_the_window_scene(mod):
   Result stayed 640 x 360 whenever it was measured. Watch for it with
   checklist #5 / #53.
 
+- **Compositor, Render Layers on a scene without a camera (1.4.2 checklist
+  run):** with another node of the tree (Cryptomatte) reading the previewed
+  scene, a Render Layers node pointed at a third scene that has no camera
+  previews the previewed scene's image instead of failing, while Blender's
+  own F12 is cancelled. Same third-scene path as the NPV-11 known limit
+  below; not changed in 1.4.2. Without that second node it fails (red `!`)
+  as checklist #22 expects.
+
 ## Known limits of the fixes
 
 - **NPV-07:** an object read through an Object / Collection socket, an

@@ -15,7 +15,9 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   sphere instead (a global world volume renders black as a plain 360°).
 - **Geometry Nodes** — a small shaded (clay) **3D render of the geometry** at
   each node, as the nodes make it (the object's own rotation, scale and parent
-  are left out, unless the tree reads them); texture / math / colour nodes can show a flat swatch of the node
+  are left out, unless the tree reads them) and as the viewport shows it
+  (modifiers' viewport toggles and subdivision levels, not the render ones);
+  texture / math / colour nodes can show a flat swatch of the node
   alone (fields linked into it are not evaluated; its own input values stand
   in, so upstream edits don't re-render it).
 - **Compositor** — each node's **image result** (renders the scene through the
@@ -160,7 +162,7 @@ Upload the zip that `python build_extension.py` wrote to `dist/` (the build
 already ran `extension validate` on it). To re-check a zip by hand:
 
 ```
-blender --command extension validate dist/node_preview-1.4.1.zip
+blender --command extension validate dist/node_preview-1.4.2.zip
 ```
 
 ## License
