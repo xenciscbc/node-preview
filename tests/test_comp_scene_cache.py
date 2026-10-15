@@ -598,6 +598,39 @@ def test_scene_settings_and_frame_change_the_key(mod):
         assert c.engine() == 1, "a frame change kept the old scene render"
 
 
+def _set_working_space(name):
+    if bpy.data.colorspace.working_space == name:
+        return          # the operator cancels a switch to the current space
+    assert bpy.ops.wm.set_working_color_space(
+        working_space=name, convert_colors=False) == {"FINISHED"}
+    assert bpy.data.colorspace.working_space == name
+
+
+def test_working_space_change_rebuilds_cache(mod):
+    # Switching the blend file's working colour space sends a depsgraph update
+    # with no updates in it: the cache key has to catch it.
+    saved = bpy.data.colorspace.working_space
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        _drop(mod)
+        blur = _ball_tree(tree, scene)
+        try:
+            _set_working_space("ACEScg")
+            _preview(mod, scene, "Blur")
+            assert _cached(mod)
+            _set_working_space("Linear Rec.709")
+            blur.inputs["Size"].default_value = (2.0, 2.0)
+            _flush()
+            with engine_renders() as c:
+                new = _preview(mod, scene, "Blur")
+            assert c.engine() == 1, \
+                "the edit composited from the other working space's render"
+            with per_node_path(mod):
+                old = _preview(mod, scene, "Blur")
+            _assert_same(old, new, "after a working space change")
+        finally:
+            _set_working_space(saved)
+
+
 def test_refresh_rebuilds_cache(mod):
     with comp_scene(mod) as (scene, tree, vl, vl2, mat):
         _drop(mod)

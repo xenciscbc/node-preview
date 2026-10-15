@@ -135,34 +135,61 @@ def test_compositor_preview_uses_low_samples(mod):
     saved = (scene.render.engine, scene.cycles.samples, scene.eevee.taa_render_samples)
     seen = []
     orig = mod.preview_scene._render_scene
+    orig_eligible = mod.renderers._comp_cache_eligible
 
-    def spy(s):
-        seen.append((s.render.engine, s.cycles.samples, s.eevee.taa_render_samples,
-                     s.render.use_motion_blur))
+    def spy(s, path=None):
+        r = s.render
+        seen.append({"engine": r.engine, "cycles": s.cycles.samples,
+                     "eevee": s.eevee.taa_render_samples, "mb": r.use_motion_blur,
+                     "comp": r.use_compositing, "format": r.image_settings.file_format,
+                     "cache": path is not None})
+        if path is not None:
+            # The compositor's scene render (renderers._comp_cache): let it
+            # run (32 px, capped samples), so the preview goes on to its
+            # composite render instead of falling back with an error.
+            return orig(s, path)
         raise RuntimeError("stop")
 
     mod.preview_scene._render_scene = spy
     try:
-        for engine in ("CYCLES", "BLENDER_EEVEE"):
-            scene.render.engine = engine
-            scene.cycles.samples = 4096
-            scene.eevee.taa_render_samples = 512
-            scene.render.use_motion_blur = True
-            try:
-                mod.renderers.render_compositor(scene, "RL", 32, scene.npv)
-            except RuntimeError:
-                pass
+        # The cached path (the scene render, then the composite), then the
+        # per-node path, which renders the scene in the composite render.
+        for per_node in (False, True):
+            if per_node:
+                mod.renderers._comp_cache_eligible = lambda tree, scn: False
+            for engine in ("CYCLES", "BLENDER_EEVEE"):
+                scene.render.engine = engine
+                scene.cycles.samples = 4096
+                scene.eevee.taa_render_samples = 512
+                scene.render.use_motion_blur = True
+                mod.preview_scene.drop_comp_cache()
+                try:
+                    mod.renderers.render_compositor(scene, "RL", 32, scene.npv)
+                except RuntimeError:
+                    pass
     finally:
         mod.preview_scene._render_scene = orig
+        mod.renderers._comp_cache_eligible = orig_eligible
+        mod.preview_scene.drop_comp_cache()
         scene.render.engine, scene.cycles.samples, scene.eevee.taa_render_samples = saved
         scene.render.use_motion_blur = False
         scene.compositing_node_group = None
         bpy.data.node_groups.remove(tree)
-    assert len(seen) == 2, seen
-    (e1, cyc, _ee1, mb1), (e2, _cyc2, eev, mb2) = seen
-    assert e1 == "CYCLES" and cyc <= 16, "Cycles preview samples = %d" % cyc
-    assert e2 == "BLENDER_EEVEE" and eev <= 16, "EEVEE preview samples = %d" % eev
-    assert not mb1 and not mb2, "motion blur left on for previews"
+    kinds = [(x["cache"], x["engine"]) for x in seen]
+    assert kinds == [(True, "CYCLES"), (False, "CYCLES"),
+                     (True, "BLENDER_EEVEE"), (False, "BLENDER_EEVEE"),
+                     (False, "CYCLES"), (False, "BLENDER_EEVEE")], kinds
+    for x in seen:
+        what = "%s %s render" % (x["engine"], "cache" if x["cache"] else "preview")
+        if x["engine"] == "CYCLES":
+            assert x["cycles"] <= 16, "%s: samples = %d" % (what, x["cycles"])
+        else:
+            assert x["eevee"] <= 16, "%s: samples = %d" % (what, x["eevee"])
+        assert not x["mb"], "%s: motion blur left on" % what
+        if x["cache"]:
+            assert not x["comp"] and x["format"] == "OPEN_EXR_MULTILAYER", x
+        else:
+            assert x["comp"] and x["format"] == "PNG", x
     assert scene.cycles.samples == saved[1], "user samples modified"
 
 

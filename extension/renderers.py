@@ -728,9 +728,12 @@ def _comp_cache_key(scene, res, props):
     drop the cache from the depsgraph handler, timer._on_depsgraph). The frame
     always: previews follow the frame only with 'Update on Frame Change', but
     one re-rendered after scrubbing (a node edit) must show the current one,
-    as it did when every preview rendered the scene."""
+    as it did when every preview rendered the scene. The blend file's working
+    colour space too: switching it sends a depsgraph update with no updates
+    in it, and the EXR holds pixels in the working space it was rendered in."""
+    working = getattr(getattr(bpy.data, "colorspace", None), "working_space", None)
     return (scene.as_pointer(), scene.name, _engine_id(props), int(res),
-            scene.frame_current, _scene_render_sig(scene))
+            scene.frame_current, working, _scene_render_sig(scene))
 
 
 def _comp_cache(scene, res, props):
