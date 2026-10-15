@@ -545,6 +545,96 @@ def test_compositor_edit_reuses_cache(mod):
         _assert_same(old, after, "after a compositor edit")
 
 
+@contextlib.contextmanager
+def _unseen_object(scene):
+    """A red-emitting cube 'RVobj' in its own collection 'RVcol', in front of
+    the rest of the scene."""
+    col = bpy.data.collections.new("NPV_tcc_RVcol")
+    scene.collection.children.link(col)
+    me = bpy.data.meshes.new("NPV_tcc_RVmesh")
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=2.4)
+    bm.to_mesh(me)
+    bm.free()
+    ob = bpy.data.objects.new("NPV_tcc_RVobj", me)
+    col.objects.link(ob)
+    mat = bpy.data.materials.new("NPV_tcc_RVmat")
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Emission Color"].default_value = (1.0, 0.0, 0.0, 1.0)
+    bsdf.inputs["Emission Strength"].default_value = 5.0
+    me.materials.append(mat)
+    try:
+        yield col, ob, bsdf
+    finally:
+        bpy.data.objects.remove(ob)
+        bpy.data.meshes.remove(me)
+        bpy.data.materials.remove(mat)
+        bpy.data.collections.remove(col)
+
+
+def _unseen_edit_case(mod, scene, tree, rl_layer, edit):
+    """Preview, edit what the window's view layer doesn't evaluate (so the
+    depsgraph update lists nothing), edit the compositor tree only, preview
+    again: the second preview must show the edited scene, like the
+    per-node render does."""
+    _drop(mod)
+    rl = _rl(tree, scene, rl_layer)
+    blur = _node(tree, "CompositorNodeBlur", "Blur", Size=(1.0, 1.0))
+    tree.links.new(rl.outputs["Image"], blur.inputs["Image"])
+    _out(tree, blur.outputs[0])
+    before = _preview(mod, scene, "Blur")
+    assert _cached(mod)
+    seen = []
+    probe = lambda _s, dg: seen.append(len(dg.updates))
+    bpy.app.handlers.depsgraph_update_post.append(probe)
+    try:
+        edit()
+        _flush()
+    finally:
+        bpy.app.handlers.depsgraph_update_post.remove(probe)
+    assert seen == [0], "the edit reached the view layer's updates: %r" % seen
+    dropped = mod._state["comp_cache"] is None
+    blur.inputs["Size"].default_value = (2.0, 2.0)
+    _flush()
+    after = _preview(mod, scene, "Blur")
+    with per_node_path(mod):
+        old = _preview(mod, scene, "Blur")
+    assert mean_rgb(before) != mean_rgb(old), "the edit changed nothing"
+    _assert_same(old, after, "after an unseen scene edit")
+    assert dropped, "an unseen scene edit kept the cache"
+
+
+def test_edit_in_excluded_collection_rebuilds_cache(mod):
+    # (a) The object's collection is excluded from the window's view layer,
+    # and a Render Layers node reads the view layer that renders it.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            vl.layer_collection.children[col.name].exclude = True
+            assert not vl2.layer_collection.children[col.name].exclude
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl2.name, lambda: setattr(
+                bsdf.inputs["Emission Color"], "default_value", (0.0, 0.0, 1.0, 1.0)))
+
+
+def test_edit_of_viewport_hidden_object_rebuilds_cache(mod):
+    # (b) Hidden in the viewport, still rendered.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ob.hide_viewport = True
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl.name, lambda: setattr(
+                bsdf.inputs["Emission Color"], "default_value", (0.0, 0.0, 1.0, 1.0)))
+
+
+def test_move_of_viewport_hidden_object_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ob.hide_viewport = True
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl.name,
+                              lambda: setattr(ob, "location", (0.0, 0.0, 3.5)))
+
+
 def test_scene_edit_rebuilds_cache(mod):
     with comp_scene(mod) as (scene, tree, vl, vl2, mat):
         _drop(mod)
