@@ -5,7 +5,7 @@ frame change, file load / save) that mark previews out of date."""
 import bpy
 from bpy.app.handlers import persistent
 
-from . import drawing, queue, sources
+from . import drawing, preview_scene, queue, sources
 from .common import KINDS, _key_ctx, _state, space_kind
 from .eligibility import _socket_enum_cache
 from .preview_scene import _cleanup_datablocks
@@ -170,10 +170,44 @@ _DATA_ID_TYPES = {"MESH", "CURVE", "CURVES", "POINTCLOUD", "VOLUME", "LATTICE",
                   "META", "FONT", "GREASEPENCIL", "GREASEPENCIL_V3"}
 
 
+# Data-blocks whose edits change what the scene renders: they drop the
+# compositor's cached scene render (renderers._comp_cache). Scene-level
+# settings (render, view layers, camera, world) are part of its key instead.
+_SCENE_CONTENT_TYPES = _DATA_ID_TYPES | {
+    "OBJECT", "COLLECTION", "MATERIAL", "LIGHT", "WORLD", "CAMERA", "KEY",
+    "TEXTURE", "IMAGE", "NODETREE", "LIGHT_PROBE", "LIGHTPROBE", "PARTICLE",
+    "CACHEFILE", "MOVIECLIP", "LINESTYLE", "SPEAKER",
+}
+
+
+def _changes_scene_render(upd):
+    """Does this depsgraph update change what the scene renders? Not an edit
+    of a compositor tree (the previews composite it, from the same render),
+    nor the Viewer / Render Result images the compositor writes."""
+    idt = getattr(upd.id, "id_type", "")
+    if idt not in _SCENE_CONTENT_TYPES:
+        return False
+    orig = getattr(upd.id, "original", upd.id)
+    if idt == "NODETREE":
+        return getattr(orig, "bl_idname", "") != "CompositorNodeTree"
+    if idt == "IMAGE":
+        return getattr(orig, "type", "") not in {"COMPOSITING", "RENDER_RESULT"}
+    return True
+
+
 @persistent
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
         return
+    # The compositor previews' scene render is out of date once the scene
+    # changes (an object, material, light ...), whatever previews are on.
+    if _state["comp_cache"] is not None:
+        try:
+            changed = any(_changes_scene_render(u) for u in depsgraph.updates)
+        except Exception:
+            changed = True
+        if changed:
+            preview_scene.drop_comp_cache()
     # Which images and object data changed is recorded even while previews
     # are off or Auto Update is off: the fingerprints are cached (_data_sig,
     # img_gen), and an edit made meanwhile must not be missed once previews

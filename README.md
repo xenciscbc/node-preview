@@ -20,11 +20,16 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   texture / math / colour nodes can show a flat swatch of the node
   alone (fields linked into it are not evaluated; its own input values stand
   in, so upstream edits don't re-render it).
-- **Compositor** — each node's **image result** (renders the scene through the
-  compositor per node). Previews render on a temporary copy of the scene, so
-  your Viewer node and Render Result keep their full resolution. They follow
-  edits to the compositor tree only: after changing the 3D scene itself
-  (objects, materials, lights), press **Refresh** to re-render them.
+- **Compositor** — each node's **image result**. The scene is rendered once
+  (all view layers and passes) and each node only re-composites that render,
+  so a whole tree costs about one scene render and editing a compositor node
+  updates in a fraction of one. (A tree with a Render Layers node inside a
+  node group, a Render Layers / Cryptomatte node reading another scene, or a
+  muted one still renders the scene per node, as before.) Previews render on
+  a temporary copy of the scene, so your Viewer node and Render Result keep
+  their full resolution. They follow edits to the compositor tree only: after
+  changing the 3D scene itself (objects, materials, lights), press
+  **Refresh** to re-render them.
 - **Node groups** — group nodes get a thumbnail of their output, and after you
   Tab into a group its nodes are previewed with the values the outer group
   node actually passes in (Shader, World, Geometry Nodes and Compositor; the

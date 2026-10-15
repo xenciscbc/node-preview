@@ -32,6 +32,9 @@ PREVIEW_CAM = "NPV_preview_cam"
 PREVIEW_SUN = "NPV_preview_sun"
 PREVIEW_MAT_TMP = "NPV_preview_tmp_mat"
 GEO_CLAY_MAT = "NPV_geo_clay"
+# One plain render of the previewed scene (every view layer and pass, as a
+# multilayer EXR in bpy.app.tempdir) that compositor previews composite from.
+COMP_CACHE_FILE = "npv_comp_cache.exr"
 GEO_WORLD_STRENGTH = 0.25
 GEO_SUN_STRENGTH = 4.0
 GEO_SUN_DIR = Vector((0.3, -0.6, 0.9)).normalized()  # towards the light
@@ -77,6 +80,9 @@ _state = {
     "editors": {},
     "export_to": None,    # file path: the next render is copied there instead
     "tree_sig_memo": None,  # tree pointer -> tree_signature, during a rebuild
+    # The compositor's scene render: {"key": what it was rendered for (see
+    # renderers._comp_cache_key), "path": the EXR}, or None.
+    "comp_cache": None,
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 

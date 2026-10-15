@@ -9,7 +9,7 @@ import hashlib
 import bpy
 import numpy as np
 
-from . import sources, timer
+from . import preview_scene, sources, timer
 from .common import (
     KIND_COMP, KIND_GEO, KIND_SHADER, KIND_WORLD, MAX_TEXTURES, VOLUME_NODES,
     _engine_id, _key_ctx, _skey, _state, _view_ctx,
@@ -388,7 +388,11 @@ def _mark_data_changed(ref):
 def rebuild_queue(tree, kind, props, force=False, path=None):
     """Queue the eligible nodes of ``tree`` whose hash changed. ``path`` is the
     editor's tree path (outermost first, ending with ``tree``); when it is
-    longer than one, ``tree`` is a node group entered from path[0]."""
+    longer than one, ``tree`` is a node group entered from path[0]. With
+    ``force`` (Refresh) the compositor's cached scene render is dropped too:
+    Refresh is how compositor previews pick up scene edits."""
+    if force and kind == KIND_COMP:
+        preview_scene.drop_comp_cache()
     _state["tree_sig_memo"] = {}
     try:
         _rebuild_queue(tree, kind, props, force, path)
@@ -504,7 +508,9 @@ def _drop_texture(key):
 
 
 def _reset_cache():
-    """Forget every thumbnail, pending render and failure."""
+    """Forget every thumbnail, pending render and failure, and the
+    compositor's cached scene render."""
+    preview_scene.drop_comp_cache()
     for k in ("textures", "tex_tick", "img_gen", "data_sigs", "data_gen", "hashes", "failed",
               "values"):
         _state[k].clear()

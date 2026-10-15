@@ -4,6 +4,7 @@ geometry, compositor results, and node groups previewed with the values
 the outer group node passes in."""
 
 import hashlib
+import os
 
 import bpy
 from mathutils import Vector
@@ -15,7 +16,9 @@ from .common import (
     SHADER_OUTPUT_NODES, VOLUME_NODES, _engine_id, _state,
 )
 from .eligibility import _out_by_id
-from .hashing import _SKIP_PROPS, _interface_sig, _socket_default, upstream_hash
+from .hashing import (
+    _SKIP_PROPS, _interface_sig, _simple_props_sig, _socket_default, upstream_hash,
+)
 from .preview_scene import _finish, ensure_preview_scene
 
 
@@ -586,7 +589,278 @@ def render_geo(obj, node_name, res, props, out_id=None, tree=None, chain=None,
     return render_geo_swatch(obj, node_name, res, props, out_id, tree)
 
 
+# --------------------------------------------------------------------------- #
+#  Compositor: one scene render, composited per node
+# --------------------------------------------------------------------------- #
+# Every compositor preview is a render of the tree, and a tree reading the
+# scene (Render Layers, Cryptomatte) makes that render run the engine first:
+# a full scene render per previewed node, on the UI thread. Without such a
+# node the render pipeline only composites. So the scene is rendered once, to
+# a multilayer EXR holding every view layer and pass, and each preview reads
+# it instead: in the throwaway tree copy, every Render Layers node becomes an
+# Image node on that EXR and every Cryptomatte node (source Render) reads it
+# as an Image. The result is the same pixels for a fraction of the time.
+# Cases where the swap would change the result render as before
+# (_comp_cache_eligible), and so does anything the swap can't map.
+_NO_SWAP = object()
+
+
+def _reads_render(node):
+    """Does this compositor node read a scene's render (and so make the
+    compositor render the scene)?"""
+    idn = node.bl_idname
+    return idn == "CompositorNodeRLayers" or (
+        idn == "CompositorNodeCryptomatteV2"
+        and getattr(node, "source", "RENDER") == "RENDER")
+
+
+def _comp_cache_eligible(tree, scene):
+    """True when the previews of ``tree`` can composite from the cached render
+    of ``scene``: some node reads the render, all of them at the top level of
+    the tree, unmuted, reading ``scene`` itself. A Render Layers node inside a
+    node group renders nothing (as on F12), one reading another scene renders
+    that scene, a muted one passes nothing through: the cache would change
+    those, so they keep rendering the scene per preview."""
+    found = False
+    groups = []
+    for n in tree.nodes:
+        if _reads_render(n):
+            if n.mute or getattr(n, "scene", None) != scene:
+                return False
+            found = True
+        sub = getattr(n, "node_tree", None)
+        if sub is not None:
+            groups.append(sub)
+    seen = set()
+    while groups:
+        g = groups.pop()
+        if g.as_pointer() in seen:
+            continue
+        seen.add(g.as_pointer())
+        for n in g.nodes:
+            if _reads_render(n):
+                return False
+            sub = getattr(n, "node_tree", None)
+            if sub is not None:
+                groups.append(sub)
+    return found
+
+
+def _comp_render_settings(scn, res, props):
+    """Render settings of a compositor preview on ``scn`` (a copy of the
+    user's scene): thumbnail size, the preview engine, transparent film, and
+    none of the user's final-render quality or output extras."""
+    r = scn.render
+    r.resolution_x = res
+    r.resolution_y = res
+    r.resolution_percentage = 100
+    try:
+        r.engine = _engine_id(props)
+    except Exception:
+        pass
+    r.use_compositing = True
+    r.film_transparent = True
+    # The copy inherits the user's output format (JPEG, EXR, ...); the
+    # loader needs an 8-bit RGBA PNG. A Video / Multilayer EXR output
+    # only accepts its own formats until the media type is Image again.
+    if "media_type" in r.image_settings.bl_rna.properties:
+        r.image_settings.media_type = "IMAGE"
+    r.image_settings.file_format = "PNG"
+    # Stereoscopy ("Individual" views) writes npv_render_L/_R.png and
+    # never the file the loader reads.
+    r.use_multiview = False
+    r.image_settings.color_mode = "RGBA"
+    r.image_settings.color_depth = "8"
+    # The copy inherits the user's final-render quality (e.g. 4096 Cycles
+    # samples); the scene renders on the UI thread, so keep it cheap.
+    r.use_motion_blur = False
+    # Nor the user's output extras: a VSE edit would replace the
+    # composite, a render region would crop it, stamps burn in text.
+    for attr in ("use_sequencer", "use_border", "use_crop_to_border", "use_stamp"):
+        try:
+            setattr(r, attr, False)
+        except Exception:
+            pass
+    try:
+        if r.engine == "CYCLES":
+            scn.cycles.samples = min(scn.cycles.samples, 16)
+        else:
+            scn.eevee.taa_render_samples = min(scn.eevee.taa_render_samples, 16)
+    except Exception:
+        pass
+
+
+def _layer_collections_sig(lc):
+    return (lc.name, lc.exclude, lc.holdout, lc.indirect_only,
+            tuple(_layer_collections_sig(c) for c in lc.children))
+
+
+def _settings_sig(struct):
+    # A view layer's depsgraph reads None until it is first evaluated (by a
+    # render, say): not a setting.
+    return tuple(v for v in _simple_props_sig(struct) if v[0] != "depsgraph")
+
+
+def _scene_render_sig(scene):
+    """The scene-level settings its render depends on: render / engine
+    settings, camera, world, view layers and their passes. Selecting an
+    object sends the same depsgraph update for the scene as changing these
+    does, so they are compared instead (_comp_cache_key)."""
+    parts = [_settings_sig(scene), _settings_sig(scene.render)]
+    for attr in ("cycles", "eevee"):
+        sub = getattr(scene, attr, None)
+        if sub is not None:
+            parts.append(_settings_sig(sub))
+    for vl in scene.view_layers:
+        parts.append(_settings_sig(vl))
+        for attr in ("cycles", "eevee"):
+            sub = getattr(vl, attr, None)
+            if sub is not None:
+                parts.append(_settings_sig(sub))
+        parts.append(tuple(_settings_sig(a) for a in getattr(vl, "aovs", ())))
+        parts.append(tuple(lg.name for lg in getattr(vl, "lightgroups", ())))
+        parts.append(_layer_collections_sig(vl.layer_collection))
+    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _comp_cache_key(scene, res, props):
+    """What the cached render depends on besides the scene's contents (those
+    drop the cache from the depsgraph handler, timer._on_depsgraph). The frame
+    always: previews follow the frame only with 'Update on Frame Change', but
+    one re-rendered after scrubbing (a node edit) must show the current one,
+    as it did when every preview rendered the scene."""
+    return (scene.as_pointer(), scene.name, _engine_id(props), int(res),
+            scene.frame_current, _scene_render_sig(scene))
+
+
+def _comp_cache(scene, res, props):
+    """Path of the multilayer EXR of ``scene`` rendered with the preview
+    settings, rendering it unless the cached one is still current."""
+    key = _comp_cache_key(scene, res, props)
+    path = preview_scene.comp_cache_path()
+    c = _state.get("comp_cache")
+    if c is not None and c["key"] == key and os.path.isfile(c["path"]):
+        return c["path"]
+    preview_scene.drop_comp_cache()
+    # A copy, like the previews themselves: rendering the user's scene would
+    # overwrite its Render Result. Without the compositor tree (shared with
+    # the user's scene by Scene.copy(), whose Render Layers nodes read the
+    # user's scene) and without compositing: the engine's passes only.
+    tmp = scene.copy()
+    try:
+        tmp.compositing_node_group = None
+        _comp_render_settings(tmp, res, props)
+        r = tmp.render
+        r.use_compositing = False
+        # Every view layer and pass, in full float. The format only accepts
+        # the multilayer EXR once the media type is set.
+        r.image_settings.media_type = "MULTI_LAYER_IMAGE"
+        r.image_settings.file_format = "OPEN_EXR_MULTILAYER"
+        r.image_settings.color_depth = "32"
+        preview_scene._render_scene(tmp, path)
+    finally:
+        try:
+            bpy.data.scenes.remove(tmp)
+        except Exception:
+            pass
+    _state["comp_cache"] = {"key": key, "path": path}
+    return path
+
+
+def _swap_in_cache(tree, img, out):
+    """Make the top level of ``tree`` read the cached render ``img`` instead
+    of the scene: each Render Layers node is replaced by an Image node on the
+    same view layer, with the same links; each Cryptomatte node (source
+    Render) reads the image. Returns ``out``, or the Image node output that
+    takes its place when it belonged to a replaced node. Raises when the
+    cache lacks a view layer or a pass a link (or ``out``) needs."""
+    new_out = out
+    for n in list(tree.nodes):
+        if n.bl_idname == "CompositorNodeRLayers":
+            layer = n.layer
+            im = tree.nodes.new("CompositorNodeImage")
+            im.image = img
+            im.layer = layer
+            if im.layer != layer:
+                raise LookupError("no view layer %r in the cache" % layer)
+            im.location = n.location
+            for o in n.outputs:
+                is_out = out is not None and o == out
+                if not (o.is_linked or is_out):
+                    continue
+                # The Image node calls the combined pass Combined.
+                name = "Combined" if o.name == "Image" else o.name
+                no = next((x for x in im.outputs if x.name == name and x.enabled), None)
+                if no is None:
+                    raise LookupError("no pass %r in the cache" % name)
+                for l in list(o.links):
+                    muted = l.is_muted
+                    nl = tree.links.new(no, l.to_socket)
+                    nl.is_muted = muted
+                if is_out:
+                    new_out = no
+            tree.nodes.remove(n)
+        elif _reads_render(n):
+            # The layer name ("<view layer>.<CryptoObject>" ...) and the
+            # picked mattes stay; only where they are read from changes.
+            layer, matte = n.layer_name, n.matte_id
+            n.source = "IMAGE"
+            n.image = img
+            n.layer_name = layer
+            n.matte_id = matte
+            if n.layer_name != layer:
+                raise LookupError("no Cryptomatte layer %r in the cache" % layer)
+    return new_out
+
+
+def _flush_depsgraph():
+    """Evaluate the depsgraph updates the preview's scene copies tagged on the
+    user's scene (its objects and collections were linked into the copy) now,
+    while _on_depsgraph ignores them (_state["rendering"]): run later, they
+    would look like scene edits and drop the cached render after every
+    preview."""
+    try:
+        wm = bpy.context.window_manager
+        layers = [w.view_layer for w in wm.windows] if wm is not None else []
+        for vl in layers or [bpy.context.view_layer]:
+            if vl is not None:
+                vl.update()
+    except Exception:
+        pass
+
+
 def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
+    """Render the preview of a compositor node. Composited from the cached
+    render of the scene (_comp_cache) when the tree allows it; otherwise, or
+    when the swap fails, the tree renders the scene itself. Export renders
+    (at their own size) don't replace the thumbnails' cached render."""
+    src_tree = getattr(scene, "compositing_node_group", None)
+    if src_tree is None or (not chain and src_tree.nodes.get(node_name) is None):
+        return None
+    # The depsgraph updates of these renders (scene copies, loaded images)
+    # are not scene edits: _on_depsgraph ignores them while this is set, as
+    # it is during the queue and Export, but not for a direct call.
+    was = _state["rendering"]
+    _state["rendering"] = True
+    try:
+        if not _state.get("export_to") and _comp_cache_eligible(src_tree, scene):
+            try:
+                cache = _comp_cache(scene, res, props)
+            except Exception as exc:
+                print("[NodePreview] compositor scene render failed: %r" % (exc,))
+                cache = None
+            if cache is not None:
+                got = _render_compositor(scene, node_name, res, props, out_id,
+                                         chain, cache)
+                if got is not _NO_SWAP:
+                    return got
+        return _render_compositor(scene, node_name, res, props, out_id, chain)
+    finally:
+        _flush_depsgraph()
+        _state["rendering"] = was
+
+
+def _render_compositor(scene, node_name, res, props, out_id, chain, cache=None):
     # Blender 5.2's new compositor evaluates only its designated output during
     # a render (the Viewer image comes from the realtime GPU compositor, which
     # a headless render does not drive). So to preview a node we temporarily
@@ -600,12 +874,13 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
     # Inside a node group, ``chain`` names the group nodes leading from the
     # scene's tree to the node; _route_out wires it out through copies of
     # those groups.
-    src_tree = getattr(scene, "compositing_node_group", None)
-    if src_tree is None or (not chain and src_tree.nodes.get(node_name) is None):
-        return None
+    # With ``cache`` (the path of the scene's cached render) the copy reads
+    # it instead of rendering the scene; _NO_SWAP when it can't.
+    src_tree = scene.compositing_node_group
     tmp = scene.copy()
     tree = src_tree.copy()
     copies = []
+    img = None
     try:
         tmp.compositing_node_group = tree
         if chain:
@@ -630,6 +905,20 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
                     n.scene = tmp
         if out is None:
             return None
+        if cache is not None:
+            # Loaded afresh each time: the file is rewritten when the cache
+            # is rebuilt, and a reused image could keep the old pixels.
+            try:
+                img = bpy.data.images.load(cache, check_existing=False)
+                out = _swap_in_cache(tree, img, out)
+            except Exception as exc:
+                # The cache lacking a view layer / pass (an unknown enum name
+                # is a TypeError) is expected; the preview then renders the
+                # scene as before. Anything else is worth a line.
+                if not isinstance(exc, (LookupError, TypeError)):
+                    print("[NodePreview] compositor cache not usable for %s: %r"
+                          % (node_name, exc))
+                return _NO_SWAP
         go = _active_output(tree.nodes, "NodeGroupOutput")
         if go is None:
             go = tree.nodes.new("NodeGroupOutput")
@@ -647,45 +936,7 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
         for l in list(goin.links):
             tree.links.remove(l)
         tree.links.new(out, goin)
-        r = tmp.render
-        r.resolution_x = res
-        r.resolution_y = res
-        r.resolution_percentage = 100
-        try:
-            r.engine = _engine_id(props)
-        except Exception:
-            pass
-        r.use_compositing = True
-        r.film_transparent = True
-        # The copy inherits the user's output format (JPEG, EXR, ...); the
-        # loader needs an 8-bit RGBA PNG. A Video / Multilayer EXR output
-        # only accepts its own formats until the media type is Image again.
-        if "media_type" in r.image_settings.bl_rna.properties:
-            r.image_settings.media_type = "IMAGE"
-        r.image_settings.file_format = "PNG"
-        # Stereoscopy ("Individual" views) writes npv_render_L/_R.png and
-        # never the file the loader reads.
-        r.use_multiview = False
-        r.image_settings.color_mode = "RGBA"
-        r.image_settings.color_depth = "8"
-        # The copy inherits the user's final-render quality (e.g. 4096 Cycles
-        # samples); every compositor node renders the scene once, on the UI
-        # thread, so keep each preview render cheap.
-        r.use_motion_blur = False
-        # Nor the user's output extras: a VSE edit would replace the
-        # composite, a render region would crop it, stamps burn in text.
-        for attr in ("use_sequencer", "use_border", "use_crop_to_border", "use_stamp"):
-            try:
-                setattr(r, attr, False)
-            except Exception:
-                pass
-        try:
-            if r.engine == "CYCLES":
-                tmp.cycles.samples = min(tmp.cycles.samples, 16)
-            else:
-                tmp.eevee.taa_render_samples = min(tmp.eevee.taa_render_samples, 16)
-        except Exception:
-            pass
+        _comp_render_settings(tmp, res, props)
         return _finish(preview_scene._render_scene(tmp))
     finally:
         try:
@@ -697,6 +948,11 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
         except Exception:
             pass
         _remove_groups(copies)
+        if img is not None:
+            try:
+                bpy.data.images.remove(img)
+            except Exception:
+                pass
 
 
 def render_world(world, node_name, res, props, out_id=None, chain=None):

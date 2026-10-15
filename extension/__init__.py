@@ -18,7 +18,7 @@ Geometry Nodes:
     evaluated; socket defaults stand in).
 Compositor:
   - Every node with an image output -> a flat swatch of that node's result.
-    (Heavier: each preview renders the scene through the compositor.)
+    (The scene is rendered once; each preview re-composites that render.)
 Lights:
   - A light's node tree (Cycles) previews like a material.
 

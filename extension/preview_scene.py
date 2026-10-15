@@ -11,9 +11,9 @@ import numpy as np
 from gpu.types import GPUTexture, Buffer
 
 from .common import (
-    ENV_IMAGE_PREFIX, GEO_CLAY_MAT, PREVIEW_CAM, PREVIEW_CUBE, PREVIEW_MAT_TMP,
-    PREVIEW_PLANE, PREVIEW_PREV_WORLD, PREVIEW_SCENE, PREVIEW_SPHERE, PREVIEW_SUN,
-    _state,
+    COMP_CACHE_FILE, ENV_IMAGE_PREFIX, GEO_CLAY_MAT, PREVIEW_CAM, PREVIEW_CUBE,
+    PREVIEW_MAT_TMP, PREVIEW_PLANE, PREVIEW_PREV_WORLD, PREVIEW_SCENE,
+    PREVIEW_SPHERE, PREVIEW_SUN, _state,
 )
 from .eligibility import _enum_num
 
@@ -276,9 +276,13 @@ def _finish(path):
     return _png_to_texture(path)
 
 
-def _render_scene(scn):
-    ext = ".exr" if scn.render.image_settings.file_format == "OPEN_EXR" else ".png"
-    path = os.path.join(bpy.app.tempdir, "npv_render" + ext)
+def _render_scene(scn, path=None):
+    """Render ``scn`` and save the result to ``path`` (default: the preview
+    render file, .png, or .exr for a Value swatch) in the scene's output
+    format; returns the path."""
+    if path is None:
+        ext = ".exr" if scn.render.image_settings.file_format == "OPEN_EXR" else ".png"
+        path = os.path.join(bpy.app.tempdir, "npv_render" + ext)
     # The previous preview's file must not pass for this one if the render
     # writes nothing.
     try:
@@ -302,6 +306,20 @@ def _render_scene(scn):
     if not os.path.isfile(path):
         raise RuntimeError("render finished without writing %s" % path)
     return path
+
+
+def comp_cache_path():
+    return os.path.join(bpy.app.tempdir, COMP_CACHE_FILE)
+
+
+def drop_comp_cache():
+    """Forget the compositor's scene render (see renderers._comp_cache): the
+    next compositor preview renders the scene again."""
+    _state["comp_cache"] = None
+    try:
+        os.remove(comp_cache_path())
+    except OSError:
+        pass
 
 
 def _cleanup_datablocks():
