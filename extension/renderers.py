@@ -5,6 +5,7 @@ the outer group node passes in."""
 
 import hashlib
 import os
+import time
 
 import bpy
 from mathutils import Vector
@@ -17,8 +18,8 @@ from .common import (
 )
 from .eligibility import _out_by_id
 from .hashing import (
-    _SKIP_PROPS, _interface_sig, _simple_props_sig, _socket_default,
-    tree_signature, upstream_hash,
+    _SKIP_PROPS, _image_sig, _interface_sig, _plain, _simple_props_sig,
+    _socket_default, tree_signature, upstream_hash,
 )
 from .preview_scene import _finish, ensure_preview_scene
 
@@ -607,9 +608,8 @@ _NO_SWAP = object()
 
 # The 'Compositor Scene Cache' modes (NPVProps.comp_cache_mode) that preview
 # from the cached render; OFF renders the scene for every node, as before
-# the cache. A later mode tracking more of what hidden objects reach would
-# join SIMPLE here.
-_CACHE_MODES = {"SIMPLE"}
+# the cache. What SIMPLE / ADVANCED check of hidden objects: _components.
+_CACHE_MODES = {"SIMPLE", "ADVANCED"}
 
 
 def _cache_mode(props):
@@ -751,13 +751,10 @@ def _window_view_layers(scene):
     return out
 
 
-def _unseen_objects(scene):
-    """Objects the scene renders that no window's depsgraph evaluates: hidden
-    in the viewport, or in a collection a window's view layer excludes (but
-    another view layer renders), plus what such objects instance. Editing
-    them reaches the depsgraph handler with nothing in its updates (or not
-    at all), so the cached render follows their content instead
-    (_unseen_content_sig)."""
+def _window_seen(scene):
+    """Pointers of the objects a window's depsgraph evaluates (visible in a
+    window's view layer of ``scene``): edits to those reach the depsgraph
+    handler's updates."""
     seen = set()
     for wl in _window_view_layers(scene):
         for ob in wl.objects:
@@ -766,6 +763,18 @@ def _unseen_objects(scene):
                     seen.add(ob.as_pointer())
             except Exception:
                 pass
+    return seen
+
+
+def _unseen_objects(scene, seen=None):
+    """Objects the scene renders that no window's depsgraph evaluates: hidden
+    in the viewport, or in a collection a window's view layer excludes (but
+    another view layer renders), plus what such objects instance. Editing
+    them reaches the depsgraph handler with nothing in its updates (or not
+    at all), so the cached render follows their content instead
+    (_unseen_content_sig)."""
+    if seen is None:
+        seen = _window_seen(scene)
     out, done = [], set()
     stack = [ob for vl in scene.view_layers if vl.use for ob in vl.objects]
     while stack:
@@ -783,6 +792,332 @@ def _unseen_objects(scene):
     return out
 
 
+# --------------------------------------------------------------------------- #
+#  What the cache checks of unseen objects (the signature's components)
+# --------------------------------------------------------------------------- #
+# Component ids, in the order the Advanced checklist shows them (NPVProps
+# comp_sig_<id>). Simple checks the first six; Advanced the ticked ones, so
+# Advanced with its defaults gives exactly Simple's signature.
+SIG_ITEMS = ("xform", "modifiers", "constraints", "data", "materials",
+             "images", "refs", "particles", "drivers")
+SIMPLE_COMPONENTS = frozenset(SIG_ITEMS[:6])
+
+
+def _components(props):
+    """The components the cache's signature covers in the current mode."""
+    if _cache_mode(props) == "ADVANCED":
+        return frozenset(i for i in SIG_ITEMS if getattr(
+            props, "comp_sig_" + i, i in SIMPLE_COMPONENTS))
+    return SIMPLE_COMPONENTS
+
+
+# An object's settings that place or show it: component 'xform'. The rest
+# of _settings_sig(ob) is always part of the signature.
+_XFORM_FIELDS = {"location", "scale", "parent", "parent_type", "parent_bone",
+                 "parent_vertices"}
+_XFORM_PREFIXES = ("rotation_", "delta_", "hide_", "visible_", "matrix_")
+
+
+def _is_xform_field(pid):
+    return pid in _XFORM_FIELDS or pid.startswith(_XFORM_PREFIXES)
+
+
+def _id_pointers(struct, out):
+    """Append the objects ``struct``'s pointer settings reach (a collection
+    as all its objects)."""
+    for p in struct.bl_rna.properties:
+        if p.type != "POINTER" or p.identifier == "rna_type":
+            continue
+        try:
+            v = getattr(struct, p.identifier)
+        except Exception:
+            continue
+        if isinstance(v, bpy.types.Object):
+            out.append(v)
+        elif isinstance(v, bpy.types.Collection):
+            out.extend(v.all_objects)
+
+
+def _walk_tree(tree, fn, _seen=None):
+    """Call fn(node) for every node of ``tree`` and of the groups it nests."""
+    if _seen is None:
+        _seen = set()
+    if tree is None or tree.as_pointer() in _seen:
+        return
+    _seen.add(tree.as_pointer())
+    for n in tree.nodes:
+        fn(n)
+        sub = getattr(n, "node_tree", None)
+        if isinstance(sub, bpy.types.NodeTree):
+            _walk_tree(sub, fn, _seen)
+
+
+def _shading_trees(ob):
+    """The node trees of ``ob``'s materials, and a light's own."""
+    out = [sl.material.node_tree for sl in ob.material_slots
+           if sl.material is not None and sl.material.node_tree is not None]
+    dnt = getattr(ob.data, "node_tree", None)
+    if dnt is not None:
+        out.append(dnt)
+    return out
+
+
+def _tree_images(trees):
+    """_image_sig of every image the trees (and their nested groups) point
+    to: component 'images'."""
+    found = {}
+
+    def visit(n):
+        for p in n.bl_rna.properties:
+            if p.type == "POINTER":
+                try:
+                    v = getattr(n, p.identifier)
+                except Exception:
+                    continue
+                if isinstance(v, bpy.types.Image):
+                    found[v.name] = v
+        for sk in n.inputs:
+            v = getattr(sk, "default_value", None) if sk.type == "IMAGE" else None
+            if isinstance(v, bpy.types.Image):
+                found[v.name] = v
+
+    for t in trees:
+        _walk_tree(t, visit)
+    return tuple(_image_sig(found[k]) for k in sorted(found))
+
+
+def _texture_sig(tex):
+    img = getattr(tex, "image", None)
+    nt = getattr(tex, "node_tree", None)
+    return (tex.name, _settings_sig(tex),
+            _image_sig(img) if img is not None else None,
+            tree_signature(nt) if nt is not None else None)
+
+
+def _particles_sig(ob):
+    """Component 'particles': each particle system's settings and the
+    textures of its slots, and the textures modifiers use (Displace, Wave,
+    Warp ...)."""
+    out = []
+    for ps in ob.particle_systems:
+        st = ps.settings
+        texs = []
+        if st is not None:
+            for ts in getattr(st, "texture_slots", ()):
+                if ts is not None and ts.texture is not None:
+                    texs.append(_texture_sig(ts.texture))
+        out.append((_settings_sig(ps), _settings_sig(st) if st is not None else None,
+                    tuple(texs)))
+    for m in ob.modifiers:
+        tex = getattr(m, "texture", None)
+        if isinstance(tex, bpy.types.Texture):
+            out.append((m.name, _texture_sig(tex)))
+    return tuple(out)
+
+
+def _driver_owners(ob):
+    """The data-blocks whose drivers component 'drivers' reads: the object,
+    its data and shape keys, its materials and their node trees, a light's
+    node tree, its Geometry Nodes modifiers' trees. (Drivers on node values
+    live on the node tree, not the material.)"""
+    data = ob.data
+    out = [ob, data, getattr(data, "shape_keys", None),
+           getattr(data, "node_tree", None)]
+    for sl in ob.material_slots:
+        if sl.material is not None:
+            out += [sl.material, sl.material.node_tree]
+    out += [m.node_group for m in ob.modifiers if m.type == "NODES"]
+    return [o for o in out if o is not None]
+
+
+_TRANSFORM_VARS = {"TRANSFORMS", "LOC_DIFF", "ROTATION_DIFF"}
+
+
+def _driver_targets(d):
+    for v in d.variables:
+        n = 2 if v.type in ("LOC_DIFF", "ROTATION_DIFF") else 1
+        for t in list(v.targets)[:n]:
+            yield v, t
+
+
+def _drivers_sig(ob):
+    """Component 'drivers': each driver's type, expression, use_self and
+    variables (type; each target's settings), and the target values -- a
+    property read with path_resolve, a transform as the target object's
+    matrix. Expressions are never evaluated and nothing is run."""
+    out = []
+    for owner in _driver_owners(ob):
+        ad = getattr(owner, "animation_data", None)
+        for fc in (ad.drivers if ad is not None else ()):
+            d = fc.driver
+            vs = []
+            for v, t in _driver_targets(d):
+                val = None
+                idb = t.id
+                if v.type == "SINGLE_PROP":
+                    try:
+                        r = idb.path_resolve(t.data_path)
+                        if isinstance(r, bpy.types.ID):
+                            val = ("ID", r.name)
+                        elif isinstance(r, bpy.types.bpy_struct):
+                            val = ("STRUCT", type(r).__name__)
+                        else:
+                            val = _plain(r)
+                    except Exception:
+                        val = "<missing>"
+                elif v.type in _TRANSFORM_VARS and isinstance(idb, bpy.types.Object):
+                    val = tuple(round(x, 5) for row in idb.matrix_world for x in row)
+                vs.append((v.name, v.type, _settings_sig(t), val))
+            out.append((owner.name, fc.data_path, fc.array_index, d.type,
+                        d.expression, d.use_self, tuple(vs)))
+    return tuple(out)
+
+
+def _object_refs(ob, comps):
+    """Component 'refs': the objects ``ob`` reaches -- its parent,
+    constraint targets, modifiers' object / collection settings and
+    Geometry Nodes inputs, Object / Collection pointers and socket values in
+    its Geometry Nodes, material and light node trees (nested groups too);
+    with 'particles' the particle instance objects, with 'drivers' the
+    driver targets."""
+    out = []
+    if ob.parent is not None:
+        out.append(ob.parent)
+    for c in ob.constraints:
+        _id_pointers(c, out)
+        for t in getattr(c, "targets", ()):       # Armature constraint
+            _id_pointers(t, out)
+    trees = _shading_trees(ob)
+    for m in ob.modifiers:
+        _id_pointers(m, out)
+        if m.type == "NODES" and m.node_group is not None:
+            trees.append(m.node_group)
+            inputs = getattr(getattr(m, "properties", None), "inputs", None)
+            for item in m.node_group.interface.items_tree:
+                if getattr(item, "item_type", "") != "SOCKET" or item.in_out != "INPUT":
+                    continue
+                v = getattr(getattr(inputs, item.identifier, None), "value", None)
+                if isinstance(v, bpy.types.Object):
+                    out.append(v)
+                elif isinstance(v, bpy.types.Collection):
+                    out.extend(v.all_objects)
+
+    def visit(n):
+        _id_pointers(n, out)
+        for sk in n.inputs:
+            if sk.type in ("OBJECT", "COLLECTION"):
+                v = getattr(sk, "default_value", None)
+                if isinstance(v, bpy.types.Object):
+                    out.append(v)
+                elif isinstance(v, bpy.types.Collection):
+                    out.extend(v.all_objects)
+
+    for t in trees:
+        _walk_tree(t, visit)
+    if "particles" in comps:
+        for ps in ob.particle_systems:
+            if ps.settings is not None:
+                _id_pointers(ps.settings, out)
+    if "drivers" in comps:
+        for owner in _driver_owners(ob):
+            ad = getattr(owner, "animation_data", None)
+            for fc in (ad.drivers if ad is not None else ()):
+                for _v, t in _driver_targets(fc.driver):
+                    if isinstance(t.id, bpy.types.Object):
+                        out.append(t.id)
+    return out
+
+
+def _object_sig_parts(ob, comps, queue):
+    """One object's part of the signature, per component in ``comps``."""
+    settings = _settings_sig(ob)
+    parts = [ob.name, ob.type,
+             tuple(v for v in settings if not _is_xform_field(v[0]))]
+    if "xform" in comps:
+        parts.append(("xform", tuple(v for v in settings if _is_xform_field(v[0])),
+                      tuple(round(x, 5) for row in ob.matrix_world for x in row)))
+    if "modifiers" in comps:
+        parts.append(("modifiers", tuple(
+            (queue._modifier_sig(m), tree_signature(m.node_group)
+             if m.type == "NODES" and m.node_group is not None else None)
+            for m in ob.modifiers)))
+    if "constraints" in comps:
+        # A constraint's settings, its target and subtarget by name.
+        parts.append(("constraints",
+                      tuple((c.type, _settings_sig(c)) for c in ob.constraints)))
+    if "data" in comps:
+        # Uncached: no depsgraph update reaches unseen data to invalidate
+        # the cached fingerprint (queue._data_sig).
+        try:
+            dsig = queue._compute_data_sig(ob.data, ob) if ob.data is not None else None
+        except Exception as exc:
+            dsig = repr(exc)
+        parts.append(("data", dsig))
+    if "materials" in comps:
+        mats = []
+        for sl in ob.material_slots:
+            mat = sl.material
+            nt = getattr(mat, "node_tree", None)
+            mats.append(None if mat is None else (
+                mat.name, _settings_sig(mat),
+                tree_signature(nt, images=False) if nt is not None else None))
+        dnt = getattr(ob.data, "node_tree", None)          # a light's nodes
+        parts.append(("materials", tuple(mats),
+                      tree_signature(dnt, images=False) if dnt is not None else None))
+    if "images" in comps:
+        parts.append(("images", _tree_images(_shading_trees(ob))))
+    if "particles" in comps:
+        parts.append(("particles", _particles_sig(ob)))
+    if "drivers" in comps:
+        parts.append(("drivers", _drivers_sig(ob)))
+    return tuple(parts)
+
+
+def _unseen_content_sig(scene, comps=SIMPLE_COMPONENTS):
+    """Fingerprint of the render-relevant content no window's depsgraph
+    reports edits to: the unseen objects (_unseen_objects) -- per component
+    in ``comps`` (SIG_ITEMS): transform and visibility, modifiers (and a
+    Geometry Nodes modifier's tree), constraints, data content, materials,
+    the images their node trees read; with 'refs' the objects they reach
+    (_object_refs), transitively, except those a window evaluates; with
+    'particles' / 'drivers' those -- and the view layers' material / world
+    overrides. Content: an IMAGE-only edit, or one evaluated along with
+    another update (selecting an object), can't be told from the depsgraph
+    update alone (a compositor edit flags the same ID types as a material
+    edit). Computed once per batch of previews (_comp_cache_key); how long it
+    took and what it covered is kept for the panel (comp_sig_stats)."""
+    # queue imports this module: imported here (data fingerprints).
+    from . import queue
+    start = time.perf_counter()
+    seen = _window_seen(scene)
+    unseen = sorted(_unseen_objects(scene, seen), key=lambda o: o.name)
+    refs = []
+    if "refs" in comps:
+        visited = {o.as_pointer() for o in unseen}
+        stack = [r for o in unseen for r in _object_refs(o, comps)]
+        while stack:
+            o = stack.pop()
+            ptr = o.as_pointer()
+            if ptr in visited:
+                continue
+            visited.add(ptr)
+            if ptr in seen:
+                continue            # its edits reach the depsgraph updates
+            refs.append(o)
+            stack.extend(_object_refs(o, comps))
+        refs.sort(key=lambda o: o.name)
+    parts = [_object_sig_parts(ob, comps, queue) for ob in unseen]
+    parts += [("ref", _object_sig_parts(ob, comps, queue)) for ob in refs]
+    for vl in scene.view_layers:
+        parts.append((vl.name, _material_sig(getattr(vl, "material_override", None)),
+                      _material_sig(getattr(vl, "world_override", None))))
+    sig = hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+    _state["comp_sig_stats"][scene.as_pointer()] = {
+        "ms": (time.perf_counter() - start) * 1000.0,
+        "unseen": len(unseen), "refs": len(refs)}
+    return sig
+
+
 def _material_sig(mat):
     if mat is None:
         return None
@@ -791,68 +1126,33 @@ def _material_sig(mat):
             tree_signature(nt) if nt is not None else None)
 
 
-def _unseen_content_sig(scene):
-    """Fingerprint of the render-relevant content no window's depsgraph
-    reports edits to: the unseen objects (_unseen_objects) -- transform,
-    visibility, modifiers (and a Geometry Nodes modifier's tree),
-    constraints, data content, materials and the images their node trees
-    read -- and the view layers' material / world overrides. Content: an
-    IMAGE-only edit, or one evaluated along with another update (selecting
-    an object), can't be told from the depsgraph update alone (a compositor
-    edit flags the same ID types as a material edit). Computed once per
-    batch of previews (_comp_cache_key)."""
-    # queue imports this module: imported here (data fingerprints).
-    from . import queue
-    parts = []
-    for ob in sorted(_unseen_objects(scene), key=lambda o: o.name):
-        data = ob.data
-        try:
-            dsig = queue._compute_data_sig(data, ob) if data is not None else None
-        except Exception as exc:
-            dsig = repr(exc)
-        mats = [_material_sig(sl.material) for sl in ob.material_slots]
-        dnt = getattr(data, "node_tree", None)        # a light's nodes
-        mods = tuple(
-            (queue._modifier_sig(m), tree_signature(m.node_group)
-             if m.type == "NODES" and m.node_group is not None else None)
-            for m in ob.modifiers)
-        # A constraint's settings, its target and subtarget by name.
-        cons = tuple((c.type, _settings_sig(c)) for c in ob.constraints)
-        parts.append((
-            ob.name, ob.type, _settings_sig(ob),
-            tuple(round(x, 5) for row in ob.matrix_world for x in row),
-            mods, cons, dsig, tuple(mats),
-            tree_signature(dnt) if dnt is not None else None))
-    for vl in scene.view_layers:
-        parts.append((vl.name, _material_sig(getattr(vl, "material_override", None)),
-                      _material_sig(getattr(vl, "world_override", None))))
-    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
-
-
 def _comp_cache_key(scene, res, props):
     """What the cached render depends on besides the scene's contents (those
     drop the cache from the depsgraph handler, timer._on_depsgraph). The frame
     always: previews follow the frame only with 'Update on Frame Change', but
     one re-rendered after scrubbing (a node edit) must show the current one,
     as it did when every preview rendered the scene. What no window's
-    depsgraph reports (hidden / excluded objects) by content. The working
-    colour space of the blend file: switching it sends a depsgraph update
-    with no updates in it, and the EXR holds pixels in the working space it
-    was rendered in."""
+    depsgraph reports (hidden / excluded objects) by content, as far as the
+    components checked (_components) go; those too. The working colour
+    space of the blend file: switching it sends a depsgraph update with no
+    updates in it, and the EXR holds pixels in the working space it was
+    rendered in."""
     working = getattr(getattr(bpy.data, "colorspace", None), "working_space", None)
+    comps = _components(props)
     # The unseen content once per batch of previews (queue.process_queue
     # sets the memo for its tick): nothing is edited in between, and
     # fingerprinting a heavy hidden mesh for every node adds up.
     memo = _state.get("unseen_sig_memo")
     ptr = scene.as_pointer()
-    if memo is not None and ptr in memo:
-        unseen = memo[ptr]
+    mkey = (ptr, _cache_mode(props), comps)
+    if memo is not None and mkey in memo:
+        unseen = memo[mkey]
     else:
-        unseen = _unseen_content_sig(scene)
+        unseen = _unseen_content_sig(scene, comps)
         if memo is not None:
-            memo[ptr] = unseen
-    return (ptr, scene.name, _engine_id(props), int(res),
-            scene.frame_current, working, _scene_render_sig(scene), unseen)
+            memo[mkey] = unseen
+    return (ptr, scene.name, _engine_id(props), int(res), scene.frame_current,
+            working, _scene_render_sig(scene), tuple(sorted(comps)), unseen)
 
 
 def _comp_cache(scene, res, props):

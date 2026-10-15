@@ -425,8 +425,11 @@ def _rebuild_queue(tree, kind, props, force, path):
     if getattr(props, "update_on_frame", False):
         esig += "|f%d" % bpy.context.scene.frame_current
     if kind == KIND_COMP:
-        # Switching the scene cache mode re-renders them.
-        esig += "|cc" + getattr(props, "comp_cache_mode", "SIMPLE")
+        # Switching the scene cache on or off re-renders them (Simple and
+        # Advanced composite the same render; what Advanced checks is part
+        # of the cache's key, not of the thumbnails').
+        esig += "|cc" + ("OFF" if getattr(props, "comp_cache_mode", "SIMPLE")
+                         == "OFF" else "ON")
     if chain:
         esig += "|" + _context_sig(src, path, chain)
     # The object / modifier side of a GN preview only matters to 3D renders of
@@ -515,7 +518,7 @@ def _reset_cache():
     compositor's cached scene render."""
     preview_scene.drop_comp_cache()
     for k in ("textures", "tex_tick", "img_gen", "data_sigs", "data_gen", "hashes", "failed",
-              "values"):
+              "values", "comp_sig_stats"):
         _state[k].clear()
     _state["queue"].clear()
     _state["queued_keys"].clear()

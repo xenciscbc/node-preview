@@ -3,7 +3,7 @@
 
 import bpy
 
-from . import queue
+from . import queue, renderers
 from .common import (
     KINDS, KIND_COMP, KIND_SHADER, KIND_WORLD, _key_ctx, _state, space_kind,
 )
@@ -143,13 +143,27 @@ class NPV_PT_panel(bpy.types.Panel):
         sub.enabled = props.preview_compositor
         sub.separator(factor=2.0)
         sub.prop(props, "comp_groups", text=t("comp_groups"))
-        sub = box.row(align=True)
-        sub.enabled = props.preview_compositor
+        col = box.column()
+        col.enabled = props.preview_compositor
+        sub = col.row()
         sub.separator(factor=2.0)
         sub.label(text=t("comp_cache"))
-        for mode in ("OFF", "SIMPLE"):
+        sub = col.row(align=True)
+        sub.separator(factor=2.0)
+        for mode in ("OFF", "SIMPLE", "ADVANCED"):
             sub.prop_enum(props, "comp_cache_mode", mode,
                           text=t("comp_cache_" + mode.lower()))
+        if props.comp_cache_mode == "ADVANCED":
+            abox = col.box()
+            abox.label(text=t("comp_sig_box"))
+            for item in renderers.SIG_ITEMS:
+                abox.prop(props, "comp_sig_" + item, text=t("comp_sig_" + item))
+            st = _state["comp_sig_stats"].get(context.scene.as_pointer())
+            if st is None:
+                abox.label(text=t("comp_sig_cost_none"), icon="TIME")
+            else:
+                abox.label(text=t("comp_sig_cost_fmt")
+                           % (st["ms"], st["unseen"], st["refs"]), icon="TIME")
         if kind == KIND_COMP and props.preview_compositor:
             box.label(text=t("comp_note1"), icon="INFO")
             box.label(text=t("comp_note2"), icon="BLANK1")

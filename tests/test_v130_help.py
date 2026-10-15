@@ -36,7 +36,9 @@ def test_help_covers_groups_and_cache(mod):
 def test_every_string_is_translated(mod):
     en, zh = set(mod.TR["EN"]), set(mod.TR["ZH"])
     assert en == zh, ("missing in ZH", sorted(en - zh), "missing in EN", sorted(zh - en))
-    for key in ("comp_groups", "pref_limit_fmt"):
+    for key in ("comp_groups", "pref_limit_fmt", "comp_cache_advanced",
+                "comp_sig_box", "comp_sig_cost_fmt", "comp_sig_cost_none") + tuple(
+                    "comp_sig_" + i for i in mod.renderers.SIG_ITEMS):
         assert key in en, key
 
 

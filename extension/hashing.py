@@ -199,7 +199,9 @@ def _curve_sig(cm):
         for c in cm.curves))
 
 
-def _node_settings(node, _seen=frozenset()):
+def _node_settings(node, _seen=frozenset(), images=True):
+    """A node's own settings. ``images`` False: an Image it points to by
+    name only, not by content (tree_signature's variant)."""
     vals = []
     for p in node.bl_rna.properties:
         pid = p.identifier
@@ -209,10 +211,10 @@ def _node_settings(node, _seen=frozenset()):
             try:
                 ref = getattr(node, pid)
                 if isinstance(ref, bpy.types.Image):
-                    vals.append((pid, _image_sig(ref)))
+                    vals.append((pid, _image_sig(ref) if images else ref.name))
                 elif isinstance(ref, bpy.types.NodeTree):
                     # Group node: its contents are part of its result.
-                    vals.append((pid, ref.name, tree_signature(ref, _seen)))
+                    vals.append((pid, ref.name, tree_signature(ref, _seen, images)))
                 elif node.bl_idname in _ID_INPUT_NODES \
                         and isinstance(ref, (bpy.types.Object, bpy.types.Collection)):
                     xform = any(output_reads_transform(o) for o in node.outputs)
@@ -285,26 +287,37 @@ def _isolated_hash(node):
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
 
 
-def tree_signature(tree, _seen=frozenset()):
+def _tree_socket_default(sock, images):
+    if not images and getattr(sock, "type", "") == "IMAGE":
+        img = getattr(sock, "default_value", None)
+        return ("IMG", img.name if img is not None else None)
+    return _socket_default(sock)
+
+
+def tree_signature(tree, _seen=frozenset(), images=True):
     """Whole-tree fingerprint, nested groups included. ``_seen`` holds the
-    trees already being walked so a malformed self-nesting can't recurse."""
+    trees already being walked so a malformed self-nesting can't recurse.
+    ``images`` False: the images it reads by name only, not their content
+    (the compositor cache's material component, renderers); never memoised,
+    so it can't hand out or take the full variant's result."""
     ptr = tree.as_pointer()
     if ptr in _seen:
         return "cycle"
     # Within one rebuild_queue pass a group used by many group nodes is
     # walked once.
-    memo = _state.get("tree_sig_memo")
+    memo = _state.get("tree_sig_memo") if images else None
     if memo is not None and ptr in memo:
         return memo[ptr]
     seen = _seen | {ptr}
     parts = []
     for n in tree.nodes:
-        parts.append((n.name, n.bl_idname, n.mute, _node_settings(n, seen)))
+        parts.append((n.name, n.bl_idname, n.mute, _node_settings(n, seen, images)))
         for inp in n.inputs:
             if not any(not l.is_muted for l in inp.links):
-                parts.append((n.name, inp.identifier, _socket_default(inp)))
+                parts.append((n.name, inp.identifier, _tree_socket_default(inp, images)))
         for out in n.outputs:  # RGB / Value nodes
-            parts.append((n.name, "O", out.identifier, _socket_default(out)))
+            parts.append((n.name, "O", out.identifier,
+                          _tree_socket_default(out, images)))
     for l in tree.links:
         parts.append((l.from_node.name, l.from_socket.identifier,
                       l.to_node.name, l.to_socket.identifier, l.is_muted))

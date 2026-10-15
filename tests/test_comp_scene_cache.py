@@ -19,6 +19,9 @@ import bpy
 from npv_testutil import capture_renders, datablock_names, mean_rgb
 
 RES = 32
+# The Compositor Scene Cache mode comp_scene() sets: test_comp_cache_advanced
+# reruns tests of this file with "ADVANCED" (and its default checklist).
+MODE = ["SIMPLE"]
 
 
 # --------------------------------------------------------------------------- #
@@ -138,9 +141,11 @@ def comp_scene(mod, engine="BLENDER_EEVEE"):
     tree.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
     tree.nodes.new("NodeGroupOutput").name = "Out"
     scene.compositing_node_group = tree
+    scene.npv.comp_cache_mode = MODE[0]
     try:
         yield scene, tree, vl, vl2, mat
     finally:
+        scene.npv.comp_cache_mode = "SIMPLE"
         scene.compositing_node_group = None
         bpy.data.node_groups.remove(tree)
         scene.view_layers.remove(vl2)
@@ -583,12 +588,15 @@ def _unseen_object(scene, image=False):
             bpy.data.images.remove(img)
 
 
-def _unseen_edit_case(mod, scene, tree, rl_layer, edit, quiet=True):
+def _unseen_edit_case(mod, scene, tree, rl_layer, edit, quiet=True, rebuild=True):
     """Preview (cache built), edit what the window's view layer doesn't
     evaluate, edit the compositor tree only, preview again: the second
     preview must show the edited scene, as the per-node render does, and so
     render the scene once more. ``quiet``: the edit reaches the depsgraph
-    handler with no updates at all (else alongside another update)."""
+    handler with no updates at all (else alongside another update).
+    ``rebuild`` False: the cache must be kept instead (an Advanced component
+    left unticked) -- no scene render, though the edit does change the
+    per-node render."""
     _drop(mod)
     rl = _rl(tree, scene, rl_layer)
     blur = _node(tree, "CompositorNodeBlur", "Blur", Size=(2.0, 2.0))
@@ -620,6 +628,9 @@ def _unseen_edit_case(mod, scene, tree, rl_layer, edit, quiet=True):
     with per_node_path(mod):
         new = _preview(mod, scene, "Blur")
     assert new != stale, "the edit changed nothing"
+    if not rebuild:
+        assert c.engine() == 0, "the cache was rebuilt (%d scene renders)" % c.engine()
+        return
     _assert_same(new, after, "after an unseen scene edit")
     assert c.engine() == 1, "the cache was not rebuilt (%d scene renders)" % c.engine()
 
@@ -1056,7 +1067,7 @@ def test_cache_mode_defaults_to_simple(mod):
     assert bpy.context.scene.npv.comp_cache_mode == "SIMPLE"
     items = [e.identifier for e in
              mod.props.NPVProps.bl_rna.properties["comp_cache_mode"].enum_items]
-    assert items == ["OFF", "SIMPLE"], items
+    assert items == ["OFF", "SIMPLE", "ADVANCED"], items
     for lang in ("EN", "ZH"):
         for k in ("comp_cache", "comp_cache_off", "comp_cache_simple"):
             assert mod.TR[lang].get(k), (lang, k)
@@ -1141,7 +1152,8 @@ def test_unseen_signature_once_per_batch(mod):
             _out(tree, prev)
             calls = []
             orig = mod.renderers._unseen_content_sig
-            mod.renderers._unseen_content_sig = lambda scn: calls.append(1) or orig(scn)
+            mod.renderers._unseen_content_sig = \
+                lambda scn, *a: calls.append(1) or orig(scn, *a)
             # A frozen clock: the Time Budget never ends a tick early, so a
             # tick renders exactly 'Nodes / Tick' previews.
             orig_time = mod.queue.time

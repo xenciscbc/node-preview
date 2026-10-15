@@ -34,9 +34,23 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
     that, in one step, changes something else and also something reachable
     only through a hidden object (an object it references that is disabled
     in renders, particle settings, textures, drivers): press **Refresh**
-    then, or set the mode to Off. (A tree with a Render Layers node inside a
-    node group, a Render Layers / Cryptomatte node reading another scene, or
-    a muted one renders the scene per node in either mode.)
+    then, or set the mode to Off.
+  - **Advanced** — Simple with a checklist of what is checked on hidden
+    objects; its defaults equal Simple. Tick *Referenced Objects*,
+    *Particles and Textures* and *Drivers* to also catch what Simple can
+    miss (a script that, in one step, changes something else and also
+    something reached only through a hidden object), at more cost; untick
+    items to make the check cheaper (e.g. a heavy hidden mesh), and press
+    **Refresh** after editing what they cover. After ticking an item,
+    Refresh updates the existing thumbnails. The panel shows how long the
+    last check took and how many hidden / referenced objects it covered.
+    Settings are per scene. It can still miss unusual dependencies (a hidden
+    armature's pose, drivers inside nested node groups or on the world
+    tree): press Refresh if a preview looks out of date.
+
+  A tree with a Render Layers node inside a node group, a Render Layers /
+  Cryptomatte node reading another scene, or a muted one renders the scene
+  per node in every mode.
 
   After you change the 3D scene, each compositor node picks up the change
   the next time it re-renders (when you edit it or a node before it). Press

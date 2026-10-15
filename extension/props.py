@@ -146,8 +146,75 @@ class NPVProps(bpy.types.PropertyGroup):
                ("SIMPLE", "Simple", "Render the scene once and re-composite "
                 "each node from it. Follows the edits Blender reports, and "
                 "the content of objects hidden in the viewport or in "
-                "excluded collections (see the help for what it can miss)")],
+                "excluded collections (see the help for what it can miss)"),
+               ("ADVANCED", "Advanced", "Like Simple, with a checklist of "
+                "what is checked on hidden objects: tick more to cover more "
+                "kinds of edits, untick to make the check cheaper. Its "
+                "defaults equal Simple")],
         default="SIMPLE", update=_comp_cache_mode_update)
+    # What Advanced checks on objects no window evaluates (hidden in the
+    # viewport, or in excluded collections). No update callback: a change is
+    # picked up by the next compositor preview (the set is part of the scene
+    # cache's key) and re-renders no thumbnail.
+    comp_sig_xform: bpy.props.BoolProperty(
+        name="Transform and Visibility",
+        description="Hidden objects' location, rotation, scale, parent and "
+                    "visibility. Very low cost. If unticked, press Refresh "
+                    "after changing this",
+        default=True)
+    comp_sig_modifiers: bpy.props.BoolProperty(
+        name="Modifiers",
+        description="Hidden objects' modifier settings, including Geometry "
+                    "Nodes trees. Low cost. If unticked, press Refresh after "
+                    "changing this",
+        default=True)
+    comp_sig_constraints: bpy.props.BoolProperty(
+        name="Constraints",
+        description="Hidden objects' constraint settings and target names. "
+                    "Very low cost. If unticked, press Refresh after "
+                    "changing this",
+        default=True)
+    comp_sig_data: bpy.props.BoolProperty(
+        name="Object Data",
+        description="Hidden objects' mesh / curve data (vertex positions, "
+                    "attributes ...). Cost grows with the vertex count. If "
+                    "unticked, press Refresh after changing this",
+        default=True)
+    comp_sig_materials: bpy.props.BoolProperty(
+        name="Materials and Light Nodes",
+        description="Hidden objects' materials and light node trees "
+                    "(structure and node settings, not image content). "
+                    "Medium cost. If unticked, press Refresh after changing "
+                    "this",
+        default=True)
+    comp_sig_images: bpy.props.BoolProperty(
+        name="Image Settings",
+        description="The images those node trees use (generated settings, "
+                    "file changes, painting). Very low cost. If unticked, "
+                    "press Refresh after changing this",
+        default=True)
+    comp_sig_refs: bpy.props.BoolProperty(
+        name="Referenced Objects",
+        description="Objects hidden objects reach (parent, constraint "
+                    "targets, Boolean / Array objects, Object Info sources, "
+                    "Texture Coordinate objects ...), transitively, even "
+                    "when disabled in renders. Medium to high cost: a large "
+                    "referenced collection can make it expensive. If "
+                    "unticked, press Refresh after changing this",
+        default=False)
+    comp_sig_particles: bpy.props.BoolProperty(
+        name="Particles and Textures",
+        description="Hidden objects' particle settings, and the textures "
+                    "their modifiers and particles use. Medium cost. If "
+                    "unticked, press Refresh after changing this",
+        default=False)
+    comp_sig_drivers: bpy.props.BoolProperty(
+        name="Drivers",
+        description="Drivers on hidden objects, their data, materials and "
+                    "node trees: definitions and target values (expressions "
+                    "are never run). Medium cost. If unticked, press Refresh "
+                    "after changing this",
+        default=False)
     preview_world: bpy.props.BoolProperty(
         name="World",
         description="Preview world / environment shader nodes",

@@ -86,6 +86,9 @@ _state = {
     # scene pointer -> renderers._unseen_content_sig, during one batch of
     # renders (queue.process_queue), else None.
     "unseen_sig_memo": None,
+    # scene pointer -> {"ms", "unseen", "refs"} of the last
+    # renderers._unseen_content_sig (the Advanced cost line).
+    "comp_sig_stats": {},
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 
