@@ -18,8 +18,8 @@ from .common import (
 )
 from .eligibility import _out_by_id
 from .hashing import (
-    _SKIP_PROPS, _image_sig, _interface_sig, _plain, _simple_props_sig,
-    _socket_default, tree_signature, upstream_hash,
+    _SKIP_PROPS, _curve_sig, _image_sig, _interface_sig, _plain,
+    _simple_props_sig, _socket_default, tree_signature, upstream_hash,
 )
 from .preview_scene import _finish, ensure_preview_scene
 
@@ -714,10 +714,14 @@ def _settings_sig(struct):
 
 def _scene_render_sig(scene):
     """The scene-level settings its render depends on: render / engine
-    settings, camera, world, view layers and their passes. Selecting an
-    object sends the same depsgraph update for the scene as changing these
-    does, so they are compared instead (_comp_cache_key)."""
-    parts = [_settings_sig(scene), _settings_sig(scene.render)]
+    settings, camera, world, view layers and their passes, colour
+    management's view settings (EEVEE's passes follow the Exposure).
+    Selecting an object sends the same depsgraph update for the scene as
+    changing these does, so they are compared instead (_comp_cache_key)."""
+    vs = scene.view_settings
+    parts = [_settings_sig(scene), _settings_sig(scene.render), _settings_sig(vs)]
+    if getattr(vs, "curve_mapping", None) is not None:
+        parts.append(_curve_sig(vs.curve_mapping))
     for attr in ("cycles", "eevee"):
         sub = getattr(scene, attr, None)
         if sub is not None:
@@ -1179,6 +1183,10 @@ def _comp_cache(scene, res, props):
         r.image_settings.media_type = "MULTI_LAYER_IMAGE"
         r.image_settings.file_format = "OPEN_EXR_MULTILAYER"
         r.image_settings.color_depth = "32"
+        # Lossless: the copy inherits the user's EXR codec, and a lossy one
+        # (DWAA / DWAB) changes every preview composited from the cache.
+        if "exr_codec" in r.image_settings.bl_rna.properties:
+            r.image_settings.exr_codec = "ZIP"
         preview_scene._render_scene(tmp, path)
     finally:
         try:

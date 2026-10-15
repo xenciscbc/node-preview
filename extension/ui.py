@@ -143,6 +143,8 @@ class NPV_PT_panel(bpy.types.Panel):
         sub.enabled = props.preview_compositor
         sub.separator(factor=2.0)
         sub.prop(props, "comp_groups", text=t("comp_groups"))
+        # The label on its own line: beside the buttons it is cut off at the
+        # default sidebar width.
         col = box.column()
         col.enabled = props.preview_compositor
         sub = col.row()
@@ -162,11 +164,14 @@ class NPV_PT_panel(bpy.types.Panel):
             if st is None:
                 abox.label(text=t("comp_sig_cost_none"), icon="TIME")
             else:
-                abox.label(text=t("comp_sig_cost_fmt")
-                           % (st["ms"], st["unseen"], st["refs"]), icon="TIME")
+                # Two lines: on one it is cut off at the default sidebar width.
+                abox.label(text=t("comp_sig_cost_fmt") % st["ms"], icon="TIME")
+                abox.label(text=t("comp_sig_cost_objs_fmt")
+                           % (st["unseen"], st["refs"]), icon="BLANK1")
         if kind == KIND_COMP and props.preview_compositor:
             box.label(text=t("comp_note1"), icon="INFO")
             box.label(text=t("comp_note2"), icon="BLANK1")
+            box.label(text=t("comp_note3"), icon="BLANK1")
 
         row = body.row(align=True)
         row.operator("node.npv_refresh", text=t("refresh"), icon="FILE_REFRESH")

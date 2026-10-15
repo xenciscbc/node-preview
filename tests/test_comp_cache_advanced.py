@@ -103,6 +103,8 @@ _RERUN = (
     "test_object_info_source_of_hidden_object_edited_rebuilds_cache",
     "test_constraint_edit_with_a_selection_rebuilds_cache",
     "test_unseen_signature_once_per_batch",
+    "test_cache_exr_is_lossless_whatever_the_output_codec",
+    "test_eevee_exposure_change_rebuilds_cache",
 )
 
 
@@ -322,7 +324,8 @@ def _emission_driver(bsdf, expression):
 
 
 def test_item_drivers_expression(mod):
-    # 9(a): a driver expression on a material node value. Ticked half only:
+    # 9(a): a driver expression on a material node value. Ticked half only
+    # (approved for this item):
     # editing an expression rebuilds the depsgraph relations, so the update
     # lists every visible object and the cache is dropped in every mode --
     # the unticked half can't keep it (checked below).
@@ -579,8 +582,11 @@ def test_panel_advanced_box(mod):
                 mod._state["comp_sig_stats"][scene.as_pointer()] = {
                     "ms": 12.0, "unseen": 3, "refs": 1}
                 rec = _draw_panel(mod, tree)
-                fmt = {mod.TR[l]["comp_sig_cost_fmt"] % (12.0, 3, 1) for l in ("EN", "ZH")}
-                assert fmt & set(rec["labels"]), rec["labels"]
+                lang = "ZH" if mod.TR["ZH"]["comp_sig_cost_fmt"] % 12.0 in rec["labels"] \
+                    else "EN"
+                tr = mod.TR[lang]
+                assert tr["comp_sig_cost_fmt"] % 12.0 in rec["labels"], rec["labels"]
+                assert tr["comp_sig_cost_objs_fmt"] % (3, 1) in rec["labels"], rec["labels"]
             for p in sig_props:
                 d = props.bl_rna.properties[p].description
                 assert "If unticked, press Refresh after changing this" in d, (p, d)
