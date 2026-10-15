@@ -130,13 +130,14 @@ class NPVProps(bpy.types.PropertyGroup):
         default=True, update=_node_show_update)
     preview_compositor: bpy.props.BoolProperty(
         name="Compositor",
-        description="Preview compositor nodes (each preview renders the scene "
-                    "through the compositor)",
+        description="Preview compositor nodes (rendered through the "
+                    "compositor; Compositor Scene Cache sets how the scene is "
+                    "rendered for them)",
         default=False, update=_mark_dirty)
     comp_groups: bpy.props.BoolProperty(
         name="Inside Node Groups",
         description="Also preview the nodes inside a compositor node group when "
-                    "you enter it (each node renders the scene once)",
+                    "you enter it",
         default=True, update=_node_show_update)
     comp_cache_mode: bpy.props.EnumProperty(
         name="Compositor Scene Cache",

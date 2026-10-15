@@ -1173,3 +1173,64 @@ def test_unseen_signature_once_per_batch(mod):
                 mod.renderers._unseen_content_sig = orig
                 mod.queue.time = orig_time
                 props.batch_size = saved
+
+
+# --------------------------------------------------------------------------- #
+#  Settings the cache must not inherit or overlook
+# --------------------------------------------------------------------------- #
+def _image_settings_state(r):
+    ims = r.image_settings
+    return (ims.media_type, ims.file_format, ims.exr_codec, ims.color_depth,
+            r.filepath)
+
+
+def test_cache_exr_is_lossless_whatever_the_output_codec(mod):
+    # The scene copy inherits the user's output format: a lossy EXR codec
+    # (DWAA / DWAB) must not reach the cached render.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        r = scene.render
+        ims = r.image_settings
+        saved = (ims.media_type, ims.file_format, ims.exr_codec, ims.color_depth)
+        _ball_tree(tree, scene)
+        try:
+            for media, fmt, codec in (("IMAGE", "OPEN_EXR", "DWAA"),
+                                      ("MULTI_LAYER_IMAGE", "OPEN_EXR_MULTILAYER", "DWAB")):
+                ims.media_type = media
+                ims.file_format = fmt
+                ims.exr_codec = codec
+                before = _image_settings_state(r)
+                _drop(mod)
+                for node, oid in (("RL", "Image"), ("Blur", None)):
+                    old, new = _both(mod, scene, node, oid)
+                    _assert_same(old, new, "%s %s output, %s" % (fmt, codec, node))
+                assert _cached(mod)
+                assert _image_settings_state(r) == before, \
+                    "the user's output settings changed"
+        finally:
+            ims.media_type, ims.file_format = saved[0], saved[1]
+            ims.exr_codec, ims.color_depth = saved[2], saved[3]
+
+
+def test_eevee_exposure_change_rebuilds_cache(mod):
+    # EEVEE's passes follow Color Management's Exposure; changing it sends
+    # only a scene update.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        vs = scene.view_settings
+        saved = vs.exposure
+        blur = _ball_tree(tree, scene)
+        try:
+            _drop(mod)
+            _preview(mod, scene, "Blur")
+            assert _cached(mod)
+            vs.exposure = 2.0
+            _flush()
+            blur.inputs["Size"].default_value = (2.0, 2.0)
+            _flush()
+            with engine_renders() as c:
+                new = _preview(mod, scene, "Blur")
+            assert c.engine() == 1, "an Exposure change kept the cache"
+            with per_node_path(mod):
+                old = _preview(mod, scene, "Blur")
+            _assert_same(old, new, "after an Exposure change")
+        finally:
+            vs.exposure = saved
