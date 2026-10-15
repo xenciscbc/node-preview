@@ -546,9 +546,10 @@ def test_compositor_edit_reuses_cache(mod):
 
 
 @contextlib.contextmanager
-def _unseen_object(scene):
+def _unseen_object(scene, image=False):
     """A red-emitting cube 'RVobj' in its own collection 'RVcol', in front of
-    the rest of the scene."""
+    the rest of the scene. With ``image`` the red comes from a generated
+    image (yielded instead of the BSDF)."""
     col = bpy.data.collections.new("NPV_tcc_RVcol")
     scene.collection.children.link(col)
     me = bpy.data.meshes.new("NPV_tcc_RVmesh")
@@ -559,30 +560,46 @@ def _unseen_object(scene):
     ob = bpy.data.objects.new("NPV_tcc_RVobj", me)
     col.objects.link(ob)
     mat = bpy.data.materials.new("NPV_tcc_RVmat")
-    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    nt = mat.node_tree
+    bsdf = nt.nodes["Principled BSDF"]
     bsdf.inputs["Emission Color"].default_value = (1.0, 0.0, 0.0, 1.0)
     bsdf.inputs["Emission Strength"].default_value = 5.0
+    img = None
+    if image:
+        img = bpy.data.images.new("NPV_tcc_RVimg", 8, 8)
+        img.generated_color = (1.0, 0.0, 0.0, 1.0)
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        nt.links.new(tex.outputs["Color"], bsdf.inputs["Emission Color"])
     me.materials.append(mat)
     try:
-        yield col, ob, bsdf
+        yield col, ob, (img if image else bsdf)
     finally:
         bpy.data.objects.remove(ob)
         bpy.data.meshes.remove(me)
         bpy.data.materials.remove(mat)
         bpy.data.collections.remove(col)
+        if img is not None:
+            bpy.data.images.remove(img)
 
 
-def _unseen_edit_case(mod, scene, tree, rl_layer, edit):
-    """Preview, edit what the window's view layer doesn't evaluate (so the
-    depsgraph update lists nothing), edit the compositor tree only, preview
-    again: the second preview must show the edited scene, like the
-    per-node render does."""
+def _unseen_edit_case(mod, scene, tree, rl_layer, edit, quiet=True):
+    """Preview (cache built), edit what the window's view layer doesn't
+    evaluate, edit the compositor tree only, preview again: the second
+    preview must show the edited scene, as the per-node render does, and so
+    render the scene once more. ``quiet``: the edit reaches the depsgraph
+    handler with no updates at all (else alongside another update)."""
     _drop(mod)
     rl = _rl(tree, scene, rl_layer)
-    blur = _node(tree, "CompositorNodeBlur", "Blur", Size=(1.0, 1.0))
+    blur = _node(tree, "CompositorNodeBlur", "Blur", Size=(2.0, 2.0))
     tree.links.new(rl.outputs["Image"], blur.inputs["Image"])
     _out(tree, blur.outputs[0])
-    before = _preview(mod, scene, "Blur")
+    # What a stale cache would show: the unedited scene at the final size.
+    with per_node_path(mod):
+        stale = _preview(mod, scene, "Blur")
+    blur.inputs["Size"].default_value = (1.0, 1.0)
+    _flush()
+    _preview(mod, scene, "Blur")
     assert _cached(mod)
     seen = []
     probe = lambda _s, dg: seen.append(len(dg.updates))
@@ -592,16 +609,28 @@ def _unseen_edit_case(mod, scene, tree, rl_layer, edit):
         _flush()
     finally:
         bpy.app.handlers.depsgraph_update_post.remove(probe)
-    assert seen == [0], "the edit reached the view layer's updates: %r" % seen
-    dropped = mod._state["comp_cache"] is None
+    if quiet:
+        assert seen == [0], "the edit reached the view layer's updates: %r" % seen
+    else:
+        assert seen and seen[0] > 0, "no other update came along: %r" % seen
     blur.inputs["Size"].default_value = (2.0, 2.0)
     _flush()
-    after = _preview(mod, scene, "Blur")
+    with engine_renders() as c:
+        after = _preview(mod, scene, "Blur")
     with per_node_path(mod):
-        old = _preview(mod, scene, "Blur")
-    assert mean_rgb(before) != mean_rgb(old), "the edit changed nothing"
-    _assert_same(old, after, "after an unseen scene edit")
-    assert dropped, "an unseen scene edit kept the cache"
+        new = _preview(mod, scene, "Blur")
+    assert new != stale, "the edit changed nothing"
+    _assert_same(new, after, "after an unseen scene edit")
+    assert c.engine() == 1, "the cache was not rebuilt (%d scene renders)" % c.engine()
+
+
+def _blue(bsdf):
+    return lambda: setattr(bsdf.inputs["Emission Color"], "default_value",
+                           (0.0, 0.0, 1.0, 1.0))
+
+
+def _blue_image(img):
+    return lambda: setattr(img, "generated_color", (0.0, 0.0, 1.0, 1.0))
 
 
 def test_edit_in_excluded_collection_rebuilds_cache(mod):
@@ -612,8 +641,7 @@ def test_edit_in_excluded_collection_rebuilds_cache(mod):
             vl.layer_collection.children[col.name].exclude = True
             assert not vl2.layer_collection.children[col.name].exclude
             _flush()
-            _unseen_edit_case(mod, scene, tree, vl2.name, lambda: setattr(
-                bsdf.inputs["Emission Color"], "default_value", (0.0, 0.0, 1.0, 1.0)))
+            _unseen_edit_case(mod, scene, tree, vl2.name, _blue(bsdf))
 
 
 def test_edit_of_viewport_hidden_object_rebuilds_cache(mod):
@@ -622,8 +650,7 @@ def test_edit_of_viewport_hidden_object_rebuilds_cache(mod):
         with _unseen_object(scene) as (col, ob, bsdf):
             ob.hide_viewport = True
             _flush()
-            _unseen_edit_case(mod, scene, tree, vl.name, lambda: setattr(
-                bsdf.inputs["Emission Color"], "default_value", (0.0, 0.0, 1.0, 1.0)))
+            _unseen_edit_case(mod, scene, tree, vl.name, _blue(bsdf))
 
 
 def test_move_of_viewport_hidden_object_rebuilds_cache(mod):
@@ -633,6 +660,58 @@ def test_move_of_viewport_hidden_object_rebuilds_cache(mod):
             _flush()
             _unseen_edit_case(mod, scene, tree, vl.name,
                               lambda: setattr(ob, "location", (0.0, 0.0, 3.5)))
+
+
+def test_image_edit_of_viewport_hidden_object_rebuilds_cache(mod):
+    # The image is used only by the hidden object: its edit flags IMAGE only.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene, image=True) as (col, ob, img):
+            ob.hide_viewport = True
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl.name, _blue_image(img))
+
+
+def test_image_edit_in_excluded_collection_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene, image=True) as (col, ob, img):
+            vl.layer_collection.children[col.name].exclude = True
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl2.name, _blue_image(img))
+
+
+def test_unseen_edit_with_a_selection_rebuilds_cache(mod):
+    # A hidden object's material edit and a selection in one evaluation: the
+    # update lists the scene (the selection), not the edit.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ob.hide_viewport = True
+            _flush()
+            cube = bpy.data.objects["Cube"]
+
+            def edit():
+                _blue(bsdf)()
+                cube.select_set(not cube.select_get())
+
+            _unseen_edit_case(mod, scene, tree, vl.name, edit, quiet=False)
+
+
+def test_hidden_objects_left_alone_keep_cache(mod):
+    # The content check must not see changes where there are none: previews
+    # and compositor edits with hidden / excluded objects reuse the cache.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene, image=True) as (col, ob, img):
+            ob.hide_viewport = True
+            blur = _ball_tree(tree, scene)
+            _drop(mod)
+            _preview(mod, scene, "Blur")
+            blur.inputs["Size"].default_value = (3.0, 3.0)
+            _flush()
+            bpy.data.objects["Cube"].select_set(True)
+            _flush()
+            with engine_renders() as c:
+                _preview(mod, scene, "Blur")
+                _preview(mod, scene, "Blur")
+            assert c.engine() == 0, "an unchanged hidden object rebuilt the cache"
 
 
 def test_scene_edit_rebuilds_cache(mod):

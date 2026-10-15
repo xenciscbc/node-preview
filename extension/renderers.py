@@ -17,7 +17,8 @@ from .common import (
 )
 from .eligibility import _out_by_id
 from .hashing import (
-    _SKIP_PROPS, _interface_sig, _simple_props_sig, _socket_default, upstream_hash,
+    _SKIP_PROPS, _interface_sig, _simple_props_sig, _socket_default,
+    tree_signature, upstream_hash,
 )
 from .preview_scene import _finish, ensure_preview_scene
 
@@ -723,17 +724,107 @@ def _scene_render_sig(scene):
     return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
 
 
+def _window_view_layers(scene):
+    """The view layers of ``scene`` whose depsgraphs the open windows
+    evaluate (the context's in background mode): the depsgraph handler only
+    hears of edits to what those show."""
+    out = []
+    try:
+        wm = bpy.context.window_manager
+        for w in (wm.windows if wm is not None else ()):
+            if w.scene == scene and w.view_layer is not None:
+                out.append(w.view_layer)
+        if not out and bpy.context.scene == scene and bpy.context.view_layer:
+            out.append(bpy.context.view_layer)
+    except Exception:
+        pass
+    return out
+
+
+def _unseen_objects(scene):
+    """Objects the scene renders that no window's depsgraph evaluates: hidden
+    in the viewport, or in a collection a window's view layer excludes (but
+    another view layer renders), plus what such objects instance. Editing
+    them reaches the depsgraph handler with nothing in its updates (or not
+    at all), so the cached render follows their content instead
+    (_unseen_content_sig)."""
+    seen = set()
+    for wl in _window_view_layers(scene):
+        for ob in wl.objects:
+            try:
+                if ob.visible_get(view_layer=wl):
+                    seen.add(ob.as_pointer())
+            except Exception:
+                pass
+    out, done = [], set()
+    stack = [ob for vl in scene.view_layers if vl.use for ob in vl.objects]
+    while stack:
+        ob = stack.pop()
+        ptr = ob.as_pointer()
+        if ptr in done or ob.hide_render:
+            continue
+        done.add(ptr)
+        if ptr in seen:
+            continue
+        out.append(ob)
+        inst = getattr(ob, "instance_collection", None)
+        if inst is not None and ob.instance_type == "COLLECTION":
+            stack.extend(inst.all_objects)
+    return out
+
+
+def _material_sig(mat):
+    if mat is None:
+        return None
+    nt = getattr(mat, "node_tree", None)
+    return (mat.name, _settings_sig(mat),
+            tree_signature(nt) if nt is not None else None)
+
+
+def _unseen_content_sig(scene):
+    """Fingerprint of the render-relevant content no window's depsgraph
+    reports edits to: the unseen objects (_unseen_objects) -- transform,
+    visibility, modifiers, data content, materials and the images their node
+    trees read -- and the view layers' material / world overrides. Content,
+    computed afresh for each cached preview: these edits send no update to
+    go by, or only alongside another one (selecting an object), and a
+    compositor edit flags the same ID types as a material edit."""
+    # queue imports this module: imported here (data fingerprints).
+    from . import queue
+    parts = []
+    for ob in sorted(_unseen_objects(scene), key=lambda o: o.name):
+        data = ob.data
+        try:
+            dsig = queue._compute_data_sig(data, ob) if data is not None else None
+        except Exception as exc:
+            dsig = repr(exc)
+        mats = [_material_sig(sl.material) for sl in ob.material_slots]
+        dnt = getattr(data, "node_tree", None)        # a light's nodes
+        parts.append((
+            ob.name, ob.type, _settings_sig(ob),
+            tuple(round(x, 5) for row in ob.matrix_world for x in row),
+            tuple(queue._modifier_sig(m) for m in ob.modifiers),
+            dsig, tuple(mats), tree_signature(dnt) if dnt is not None else None))
+    for vl in scene.view_layers:
+        parts.append((vl.name, _material_sig(getattr(vl, "material_override", None)),
+                      _material_sig(getattr(vl, "world_override", None))))
+    return hashlib.md5(repr(parts).encode("utf-8", "replace")).hexdigest()
+
+
 def _comp_cache_key(scene, res, props):
     """What the cached render depends on besides the scene's contents (those
     drop the cache from the depsgraph handler, timer._on_depsgraph). The frame
     always: previews follow the frame only with 'Update on Frame Change', but
     one re-rendered after scrubbing (a node edit) must show the current one,
-    as it did when every preview rendered the scene. The blend file's working
-    colour space too: switching it sends a depsgraph update with no updates
-    in it, and the EXR holds pixels in the working space it was rendered in."""
+    as it did when every preview rendered the scene. What no window's
+    depsgraph reports (hidden / excluded objects) by content. The working
+    colour space of the blend file: switching it sends a depsgraph update
+    with no updates in it, and the EXR holds pixels in the working space it
+    was rendered in."""
     working = getattr(getattr(bpy.data, "colorspace", None), "working_space", None)
     return (scene.as_pointer(), scene.name, _engine_id(props), int(res),
-            scene.frame_current, working, _scene_render_sig(scene))
+            scene.frame_current, working, _scene_render_sig(scene),
+            _unseen_content_sig(scene))
 
 
 def _comp_cache(scene, res, props):

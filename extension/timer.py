@@ -195,29 +195,6 @@ def _changes_scene_render(upd):
     return True
 
 
-_unseen_types = []
-
-
-def _changes_unseen_content(depsgraph):
-    """An edit to scene content this depsgraph doesn't evaluate -- an object
-    hidden in the viewport, or in a collection this view layer excludes but
-    another view layer renders -- arrives with no updates, only the edited
-    ID type flagged (id_type_updated). Only with no updates: a compositor
-    edit flags the shading types (MATERIAL, WORLD, LIGHT ...) too, and
-    selecting an object flags OBJECT, but both send an update (the tree,
-    the scene). Not NODETREE / IMAGE: every node tree edit flags NODETREE,
-    the Viewer / Render Result images IMAGE."""
-    check = getattr(depsgraph, "id_type_updated", None)
-    if check is None or len(depsgraph.updates):
-        return False
-    if not _unseen_types:
-        valid = {e.identifier for e in
-                 bpy.types.ID.bl_rna.properties["id_type"].enum_items}
-        _unseen_types.extend(sorted(
-            (_SCENE_CONTENT_TYPES - {"NODETREE", "IMAGE"}) & valid))
-    return any(check(t) for t in _unseen_types)
-
-
 @persistent
 def _on_depsgraph(scene, depsgraph):
     if _state["rendering"]:
@@ -225,9 +202,10 @@ def _on_depsgraph(scene, depsgraph):
     # The compositor previews' scene render is out of date once the scene
     # changes (an object, material, light ...), whatever previews are on.
     if _state["comp_cache"] is not None:
+        # (What no window's depsgraph evaluates -- hidden / excluded
+        # objects -- is checked by content, renderers._unseen_content_sig.)
         try:
-            changed = any(_changes_scene_render(u) for u in depsgraph.updates) \
-                or _changes_unseen_content(depsgraph)
+            changed = any(_changes_scene_render(u) for u in depsgraph.updates)
         except Exception:
             changed = True
         if changed:
