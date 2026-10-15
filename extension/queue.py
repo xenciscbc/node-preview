@@ -424,6 +424,9 @@ def _rebuild_queue(tree, kind, props, force, path):
                             int(getattr(props, "show_values", True)))
     if getattr(props, "update_on_frame", False):
         esig += "|f%d" % bpy.context.scene.frame_current
+    if kind == KIND_COMP:
+        # Switching the scene cache mode re-renders them.
+        esig += "|cc" + getattr(props, "comp_cache_mode", "SIMPLE")
     if chain:
         esig += "|" + _context_sig(src, path, chain)
     # The object / modifier side of a GN preview only matters to 3D renders of
@@ -645,6 +648,9 @@ def process_queue(props):
     did = False
     start = time.perf_counter()
     _state["rendering"] = True
+    # Nothing is edited during this batch: compositor previews fingerprint
+    # the hidden objects' content once for all of them.
+    _state["unseen_sig_memo"] = {}
     try:
         for i in range(n):
             if not _state["queue"]:
@@ -675,6 +681,7 @@ def process_queue(props):
     finally:
         _state["rendering"] = False
         _state["last_value"] = None
+        _state["unseen_sig_memo"] = None
     return did
 
 

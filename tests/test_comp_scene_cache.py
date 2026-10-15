@@ -695,6 +695,157 @@ def test_unseen_edit_with_a_selection_rebuilds_cache(mod):
             _unseen_edit_case(mod, scene, tree, vl.name, edit, quiet=False)
 
 
+def _gn_transform(ob):
+    """A Geometry Nodes modifier on ``ob``: Group Input -> Transform Geometry
+    -> Group Output. Returns (tree, Transform node)."""
+    ng = bpy.data.node_groups.new("NPV_tcc_gn", "GeometryNodeTree")
+    ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    gi = ng.nodes.new("NodeGroupInput")
+    go = ng.nodes.new("NodeGroupOutput")
+    tr = ng.nodes.new("GeometryNodeTransform")
+    ng.links.new(gi.outputs[0], tr.inputs["Geometry"])
+    ng.links.new(tr.outputs[0], go.inputs[0])
+    m = ob.modifiers.new("NPV_tcc_gn", "NODES")
+    m.node_group = ng
+    return ng, tr
+
+
+def _helper_object(col, name, size):
+    """A cube only another object uses: hidden in the viewport and disabled
+    in renders, so no window's depsgraph has it and nothing renders it."""
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=size)
+    bm.to_mesh(me)
+    bm.free()
+    ob = bpy.data.objects.new(name, me)
+    col.objects.link(ob)
+    ob.hide_viewport = True
+    ob.hide_render = True
+    return ob
+
+
+def _remove_object(ob):
+    me = ob.data
+    bpy.data.objects.remove(ob)
+    bpy.data.meshes.remove(me)
+
+
+def test_gn_tree_edit_of_viewport_hidden_object_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ng, tr = _gn_transform(ob)
+            try:
+                ob.hide_viewport = True
+                _flush()
+                _unseen_edit_case(mod, scene, tree, vl.name, lambda: setattr(
+                    tr.inputs["Scale"], "default_value", (0.01, 0.01, 0.01)))
+            finally:
+                bpy.data.node_groups.remove(ng)
+
+
+def test_gn_tree_edit_in_excluded_collection_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ng, tr = _gn_transform(ob)
+            try:
+                vl.layer_collection.children[col.name].exclude = True
+                _flush()
+                _unseen_edit_case(mod, scene, tree, vl2.name, lambda: setattr(
+                    tr.inputs["Scale"], "default_value", (0.01, 0.01, 0.01)))
+            finally:
+                bpy.data.node_groups.remove(ng)
+
+
+def _limit_z(ob):
+    c = ob.constraints.new("LIMIT_LOCATION")
+    c.use_min_z = True
+    c.min_z = -100.0
+    return c
+
+
+def test_constraint_edit_of_viewport_hidden_object_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            c = _limit_z(ob)
+            ob.hide_viewport = True
+            _flush()
+            _unseen_edit_case(mod, scene, tree, vl.name,
+                              lambda: setattr(c, "min_z", 50.0))
+
+
+def test_boolean_cutter_of_hidden_object_moved_rebuilds_cache(mod):
+    # The cutter is used only by the hidden object and is itself disabled in
+    # renders: no depsgraph update lists it.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            cutter = _helper_object(col, "NPV_tcc_cutter", 6.0)
+            try:
+                m = ob.modifiers.new("NPV_tcc_bool", "BOOLEAN")
+                m.operation = "INTERSECT"
+                m.object = cutter
+                ob.hide_viewport = True
+                _flush()
+                _unseen_edit_case(mod, scene, tree, vl.name,
+                                  lambda: setattr(cutter, "location", (50.0, 0.0, 0.0)))
+            finally:
+                ob.modifiers.clear()
+                _remove_object(cutter)
+
+
+def test_object_info_source_of_hidden_object_edited_rebuilds_cache(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            src = _helper_object(col, "NPV_tcc_src", 2.4)
+            ng = bpy.data.node_groups.new("NPV_tcc_gnref", "GeometryNodeTree")
+            try:
+                ng.interface.new_socket("Geometry", in_out="INPUT",
+                                        socket_type="NodeSocketGeometry")
+                ng.interface.new_socket("Geometry", in_out="OUTPUT",
+                                        socket_type="NodeSocketGeometry")
+                ng.nodes.new("NodeGroupInput")
+                go = ng.nodes.new("NodeGroupOutput")
+                oi = ng.nodes.new("GeometryNodeObjectInfo")
+                oi.inputs["Object"].default_value = src
+                setm = ng.nodes.new("GeometryNodeSetMaterial")
+                setm.inputs["Material"].default_value = ob.data.materials[0]
+                ng.links.new(oi.outputs["Geometry"], setm.inputs["Geometry"])
+                ng.links.new(setm.outputs[0], go.inputs[0])
+                m = ob.modifiers.new("NPV_tcc_gnref", "NODES")
+                m.node_group = ng
+                ob.hide_viewport = True
+                _flush()
+
+                def edit():
+                    from mathutils import Matrix
+                    src.data.transform(Matrix.Scale(0.01, 4))
+                    src.data.update()
+
+                _unseen_edit_case(mod, scene, tree, vl.name, edit)
+            finally:
+                ob.modifiers.clear()
+                bpy.data.node_groups.remove(ng)
+                _remove_object(src)
+
+
+def test_constraint_edit_with_a_selection_rebuilds_cache(mod):
+    # Coalesced with a selection: the update lists the scene, so only the
+    # content fingerprint (constraints) can tell.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        with _unseen_object(scene) as (col, ob, bsdf):
+            c = _limit_z(ob)
+            ob.hide_viewport = True
+            _flush()
+            cube = bpy.data.objects["Cube"]
+
+            def edit():
+                c.min_z = 50.0
+                cube.select_set(not cube.select_get())
+
+            _unseen_edit_case(mod, scene, tree, vl.name, edit, quiet=False)
+
+
 def test_hidden_objects_left_alone_keep_cache(mod):
     # The content check must not see changes where there are none: previews
     # and compositor edits with hidden / excluded objects reuse the cache.
@@ -896,3 +1047,129 @@ def test_reset_cache_drops_comp_cache(mod):
         path = mod._state["comp_cache"]["path"]
         mod.queue._reset_cache()        # Clear Cache, file load, unregister
         assert mod._state["comp_cache"] is None and not os.path.exists(path)
+
+
+# --------------------------------------------------------------------------- #
+#  The 'Compositor Scene Cache' mode
+# --------------------------------------------------------------------------- #
+def test_cache_mode_defaults_to_simple(mod):
+    assert bpy.context.scene.npv.comp_cache_mode == "SIMPLE"
+    items = [e.identifier for e in
+             mod.props.NPVProps.bl_rna.properties["comp_cache_mode"].enum_items]
+    assert items == ["OFF", "SIMPLE"], items
+    for lang in ("EN", "ZH"):
+        for k in ("comp_cache", "comp_cache_off", "comp_cache_simple"):
+            assert mod.TR[lang].get(k), (lang, k)
+
+
+def test_cache_mode_off_renders_scene_per_node(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        props = scene.npv
+        _drop(mod)
+        _passes_tree(tree, scene)
+        nodes = ["Defocus", "Blur", "Mix"]
+        try:
+            _preview(mod, scene, "Blur")
+            assert _cached(mod)
+            path = mod._state["comp_cache"]["path"]
+            props.comp_cache_mode = "OFF"
+            assert mod._state["comp_cache"] is None and not os.path.exists(path), \
+                "switching to Off kept the cache"
+            reads = []
+            orig = mod.renderers._comp_cache
+            mod.renderers._comp_cache = lambda *a: reads.append(a) or orig(*a)
+            try:
+                with engine_renders() as c:
+                    for node in nodes:
+                        _preview(mod, scene, node)
+            finally:
+                mod.renderers._comp_cache = orig
+            assert c.engine() == len(nodes), \
+                "Off: %d scene renders for %d previews" % (c.engine(), len(nodes))
+            assert not reads and mod._state["comp_cache"] is None \
+                and not os.path.exists(path), "Off created or read the cache"
+            props.comp_cache_mode = "SIMPLE"
+            with engine_renders() as c:
+                for node in nodes:
+                    _preview(mod, scene, node)
+            assert c.engine() == 1 and _cached(mod), \
+                "Simple again: %d scene renders" % c.engine()
+        finally:
+            props.comp_cache_mode = "SIMPLE"
+
+
+def test_cache_mode_change_rerenders_compositor_previews(mod):
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        props = scene.npv
+        _ball_tree(tree, scene)
+        st = mod._state
+        try:
+            for k in ("queue", "queued_keys", "hashes"):
+                st[k].clear()
+            mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props, path=[tree])
+            queued = [it["key"] for it in st["queue"]]
+            assert queued
+            for it in st["queue"]:          # as if rendered
+                st["hashes"][it["key"]] = it["hash"]
+                st["textures"][it["key"]] = object()
+            st["queue"].clear()
+            st["queued_keys"].clear()
+            mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props, path=[tree])
+            assert not st["queue"], "requeued with nothing changed"
+            props.comp_cache_mode = "OFF"
+            assert st["dirty"]
+            mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props, path=[tree])
+            assert sorted(it["key"] for it in st["queue"]) == sorted(queued), \
+                "switching the mode did not re-render the previews"
+        finally:
+            props.comp_cache_mode = "SIMPLE"
+
+
+def test_unseen_signature_once_per_batch(mod):
+    # A 9-node Refresh: the hidden objects' content is fingerprinted once per
+    # timer tick (batch of renders), not once per node.
+    with comp_scene(mod) as (scene, tree, vl, vl2, mat):
+        props = scene.npv
+        with _unseen_object(scene) as (col, ob, bsdf):
+            ob.hide_viewport = True
+            rl = _rl(tree, scene)
+            prev = rl.outputs["Image"]
+            for i in range(8):
+                b = _node(tree, "CompositorNodeBlur", "B%d" % i, Size=(1.0, 1.0))
+                tree.links.new(prev, b.inputs["Image"])
+                prev = b.outputs[0]
+            _out(tree, prev)
+            calls = []
+            orig = mod.renderers._unseen_content_sig
+            mod.renderers._unseen_content_sig = lambda scn: calls.append(1) or orig(scn)
+            # A frozen clock: the Time Budget never ends a tick early, so a
+            # tick renders exactly 'Nodes / Tick' previews.
+            orig_time = mod.queue.time
+            mod.queue.time = type("FrozenClock", (), {
+                "perf_counter": staticmethod(lambda: 0.0)})
+            saved = props.batch_size
+            try:
+                for batch in (8, 2):
+                    props.batch_size = batch
+                    _drop(mod)
+                    st = mod._state
+                    for k in ("queue", "queued_keys", "hashes"):
+                        st[k].clear()
+                    mod.queue.rebuild_queue(tree, mod.common.KIND_COMP, props,
+                                            force=True, path=[tree])
+                    queued = len(st["queue"])
+                    assert queued == 9, queued
+                    calls.clear()
+                    ticks = 0
+                    with capture_renders(mod) as shots:
+                        while st["queue"]:
+                            mod.queue.process_queue(props)
+                            ticks += 1
+                    assert len(shots) == 9, len(shots)
+                    assert len(calls) == ticks == -(-9 // batch), \
+                        "batch %d: %d fingerprints in %d ticks" % (batch, len(calls), ticks)
+                    assert mod._state["unseen_sig_memo"] is None
+            finally:
+                mod.renderers._unseen_content_sig = orig
+                mod.queue.time = orig_time
+                props.batch_size = saved

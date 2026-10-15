@@ -3,7 +3,7 @@
 
 import bpy
 
-from . import queue
+from . import preview_scene, queue
 from .common import _state
 from .preview_scene import _env_items
 from .timer import _ensure_timer
@@ -35,6 +35,15 @@ def _redraw(self, context):
 
 
 def _node_show_update(self, context):
+    _state["dirty"] = True
+    queue._tag_node_editors()
+
+
+def _comp_cache_mode_update(self, context):
+    # Part of the compositor previews' hash: they all render again. Off
+    # never reads the cache, so it goes.
+    if self.comp_cache_mode == "OFF":
+        preview_scene.drop_comp_cache()
     _state["dirty"] = True
     queue._tag_node_editors()
 
@@ -129,6 +138,16 @@ class NPVProps(bpy.types.PropertyGroup):
         description="Also preview the nodes inside a compositor node group when "
                     "you enter it (each node renders the scene once)",
         default=True, update=_node_show_update)
+    comp_cache_mode: bpy.props.EnumProperty(
+        name="Compositor Scene Cache",
+        description="How compositor previews get the scene they composite",
+        items=[("OFF", "Off", "Render the scene for every compositor node: "
+                "always current, slowest"),
+               ("SIMPLE", "Simple", "Render the scene once and re-composite "
+                "each node from it. Follows the edits Blender reports, and "
+                "the content of objects hidden in the viewport or in "
+                "excluded collections (see the help for what it can miss)")],
+        default="SIMPLE", update=_comp_cache_mode_update)
     preview_world: bpy.props.BoolProperty(
         name="World",
         description="Preview world / environment shader nodes",

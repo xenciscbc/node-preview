@@ -20,16 +20,27 @@ Tested on **Blender 5.2.2** on **Windows 11** (EEVEE + Cycles, Vulkan).
   texture / math / colour nodes can show a flat swatch of the node
   alone (fields linked into it are not evaluated; its own input values stand
   in, so upstream edits don't re-render it).
-- **Compositor** — each node's **image result**. The scene is rendered once
-  (all view layers and passes) and each node only re-composites that render,
-  so a whole tree costs about one scene render and editing a compositor node
-  updates in a fraction of one. (A tree with a Render Layers node inside a
-  node group, a Render Layers / Cryptomatte node reading another scene, or a
-  muted one still renders the scene per node, as before.) Previews render on
-  a temporary copy of the scene, so your Viewer node and Render Result keep
-  their full resolution. They follow edits to the compositor tree only: after
-  changing the 3D scene itself (objects, materials, lights), press
-  **Refresh** to re-render them.
+- **Compositor** — each node's **image result**. Previews render on a
+  temporary copy of the scene, so your Viewer node and Render Result keep
+  their full resolution. *Compositor Scene Cache* (under Compositor):
+  - **Off** — renders the scene for every node. Always current, slowest.
+  - **Simple** (default) — renders the scene once (all view layers and
+    passes) and re-composites each node from it, so a whole tree costs about
+    one scene render. It notices every edit Blender reports for visible
+    objects, materials, lights, world, camera and images. For objects hidden
+    in the viewport or in excluded collections it notices single edits, plus
+    their transform, modifiers (including Geometry Nodes trees), constraints,
+    mesh data, materials and the images those use. It can miss a script
+    that, in one step, changes something else and also something reachable
+    only through a hidden object (an object it references that is disabled
+    in renders, particle settings, textures, drivers): press **Refresh**
+    then, or set the mode to Off. (A tree with a Render Layers node inside a
+    node group, a Render Layers / Cryptomatte node reading another scene, or
+    a muted one renders the scene per node in either mode.)
+
+  After you change the 3D scene, each compositor node picks up the change
+  the next time it re-renders (when you edit it or a node before it). Press
+  **Refresh** to update them all at once.
 - **Node groups** — group nodes get a thumbnail of their output, and after you
   Tab into a group its nodes are previewed with the values the outer group
   node actually passes in (Shader, World, Geometry Nodes and Compositor; the

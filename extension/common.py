@@ -83,6 +83,9 @@ _state = {
     # The compositor's scene render: {"key": what it was rendered for (see
     # renderers._comp_cache_key), "path": the EXR}, or None.
     "comp_cache": None,
+    # scene pointer -> renderers._unseen_content_sig, during one batch of
+    # renders (queue.process_queue), else None.
+    "unseen_sig_memo": None,
 }
 MAX_TEXTURES = 256        # cached thumbnails kept before evicting least-used
 

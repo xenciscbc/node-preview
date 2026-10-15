@@ -143,6 +143,13 @@ class NPV_PT_panel(bpy.types.Panel):
         sub.enabled = props.preview_compositor
         sub.separator(factor=2.0)
         sub.prop(props, "comp_groups", text=t("comp_groups"))
+        sub = box.row(align=True)
+        sub.enabled = props.preview_compositor
+        sub.separator(factor=2.0)
+        sub.label(text=t("comp_cache"))
+        for mode in ("OFF", "SIMPLE"):
+            sub.prop_enum(props, "comp_cache_mode", mode,
+                          text=t("comp_cache_" + mode.lower()))
         if kind == KIND_COMP and props.preview_compositor:
             box.label(text=t("comp_note1"), icon="INFO")
             box.label(text=t("comp_note2"), icon="BLANK1")

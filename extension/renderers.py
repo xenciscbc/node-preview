@@ -605,6 +605,16 @@ def render_geo(obj, node_name, res, props, out_id=None, tree=None, chain=None,
 # (_comp_cache_eligible), and so does anything the swap can't map.
 _NO_SWAP = object()
 
+# The 'Compositor Scene Cache' modes (NPVProps.comp_cache_mode) that preview
+# from the cached render; OFF renders the scene for every node, as before
+# the cache. A later mode tracking more of what hidden objects reach would
+# join SIMPLE here.
+_CACHE_MODES = {"SIMPLE"}
+
+
+def _cache_mode(props):
+    return getattr(props, "comp_cache_mode", "SIMPLE")
+
 
 def _reads_render(node):
     """Does this compositor node read a scene's render (and so make the
@@ -784,11 +794,13 @@ def _material_sig(mat):
 def _unseen_content_sig(scene):
     """Fingerprint of the render-relevant content no window's depsgraph
     reports edits to: the unseen objects (_unseen_objects) -- transform,
-    visibility, modifiers, data content, materials and the images their node
-    trees read -- and the view layers' material / world overrides. Content,
-    computed afresh for each cached preview: these edits send no update to
-    go by, or only alongside another one (selecting an object), and a
-    compositor edit flags the same ID types as a material edit."""
+    visibility, modifiers (and a Geometry Nodes modifier's tree),
+    constraints, data content, materials and the images their node trees
+    read -- and the view layers' material / world overrides. Content: an
+    IMAGE-only edit, or one evaluated along with another update (selecting
+    an object), can't be told from the depsgraph update alone (a compositor
+    edit flags the same ID types as a material edit). Computed once per
+    batch of previews (_comp_cache_key)."""
     # queue imports this module: imported here (data fingerprints).
     from . import queue
     parts = []
@@ -800,11 +812,17 @@ def _unseen_content_sig(scene):
             dsig = repr(exc)
         mats = [_material_sig(sl.material) for sl in ob.material_slots]
         dnt = getattr(data, "node_tree", None)        # a light's nodes
+        mods = tuple(
+            (queue._modifier_sig(m), tree_signature(m.node_group)
+             if m.type == "NODES" and m.node_group is not None else None)
+            for m in ob.modifiers)
+        # A constraint's settings, its target and subtarget by name.
+        cons = tuple((c.type, _settings_sig(c)) for c in ob.constraints)
         parts.append((
             ob.name, ob.type, _settings_sig(ob),
             tuple(round(x, 5) for row in ob.matrix_world for x in row),
-            tuple(queue._modifier_sig(m) for m in ob.modifiers),
-            dsig, tuple(mats), tree_signature(dnt) if dnt is not None else None))
+            mods, cons, dsig, tuple(mats),
+            tree_signature(dnt) if dnt is not None else None))
     for vl in scene.view_layers:
         parts.append((vl.name, _material_sig(getattr(vl, "material_override", None)),
                       _material_sig(getattr(vl, "world_override", None))))
@@ -822,9 +840,19 @@ def _comp_cache_key(scene, res, props):
     with no updates in it, and the EXR holds pixels in the working space it
     was rendered in."""
     working = getattr(getattr(bpy.data, "colorspace", None), "working_space", None)
-    return (scene.as_pointer(), scene.name, _engine_id(props), int(res),
-            scene.frame_current, working, _scene_render_sig(scene),
-            _unseen_content_sig(scene))
+    # The unseen content once per batch of previews (queue.process_queue
+    # sets the memo for its tick): nothing is edited in between, and
+    # fingerprinting a heavy hidden mesh for every node adds up.
+    memo = _state.get("unseen_sig_memo")
+    ptr = scene.as_pointer()
+    if memo is not None and ptr in memo:
+        unseen = memo[ptr]
+    else:
+        unseen = _unseen_content_sig(scene)
+        if memo is not None:
+            memo[ptr] = unseen
+    return (ptr, scene.name, _engine_id(props), int(res),
+            scene.frame_current, working, _scene_render_sig(scene), unseen)
 
 
 def _comp_cache(scene, res, props):
@@ -925,9 +953,10 @@ def _flush_depsgraph():
 
 def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
     """Render the preview of a compositor node. Composited from the cached
-    render of the scene (_comp_cache) when the tree allows it; otherwise, or
-    when the swap fails, the tree renders the scene itself. Export renders
-    (at their own size) don't replace the thumbnails' cached render."""
+    render of the scene (_comp_cache) when the mode and the tree allow it;
+    otherwise, or when the swap fails, the tree renders the scene itself.
+    Export renders (at their own size) don't replace the thumbnails' cached
+    render."""
     src_tree = getattr(scene, "compositing_node_group", None)
     if src_tree is None or (not chain and src_tree.nodes.get(node_name) is None):
         return None
@@ -937,7 +966,8 @@ def render_compositor(scene, node_name, res, props, out_id=None, chain=None):
     was = _state["rendering"]
     _state["rendering"] = True
     try:
-        if not _state.get("export_to") and _comp_cache_eligible(src_tree, scene):
+        if not _state.get("export_to") and _cache_mode(props) in _CACHE_MODES \
+                and _comp_cache_eligible(src_tree, scene):
             try:
                 cache = _comp_cache(scene, res, props)
             except Exception as exc:
